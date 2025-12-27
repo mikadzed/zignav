@@ -13,7 +13,7 @@ pub fn main() !void {
         return;
     }
 
-    std.debug.print("Starting keyboard monitor (Ctrl+C to exit)...\n", .{});
+    std.debug.print("Listening for Cmd+Shift+Space (Ctrl+C to exit)...\n", .{});
 
     hotkey.init() catch |err| {
         std.debug.print("Error: {}\n", .{err});

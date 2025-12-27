@@ -10,10 +10,56 @@ pub const HotkeyError = error{
     RunLoopSourceCreationFailed,
 };
 
-// Module-level state (C callbacks can't capture closures)
+// Modifier flags
+pub const Modifiers = struct {
+    command: bool = false,
+    shift: bool = false,
+    option: bool = false,
+    control: bool = false,
+
+    pub fn fromCGEventFlags(flags: c.CGEventFlags) Modifiers {
+        return .{
+            .command = (flags & c.kCGEventFlagMaskCommand) != 0,
+            .shift = (flags & c.kCGEventFlagMaskShift) != 0,
+            .option = (flags & c.kCGEventFlagMaskAlternate) != 0,
+            .control = (flags & c.kCGEventFlagMaskControl) != 0,
+        };
+    }
+
+    pub fn matches(self: Modifiers, other: Modifiers) bool {
+        return self.command == other.command and
+            self.shift == other.shift and
+            self.option == other.option and
+            self.control == other.control;
+    }
+};
+
+// Hotkey definition
+pub const Hotkey = struct {
+    keycode: u16,
+    modifiers: Modifiers,
+};
+
+// Common keycodes
+pub const Keycode = struct {
+    pub const space: u16 = 49;
+    pub const escape: u16 = 53;
+    pub const @"return": u16 = 36;
+    pub const tab: u16 = 48;
+};
+
+// Default hotkey: Cmd+Shift+Space
+pub const default_hotkey = Hotkey{
+    .keycode = Keycode.space,
+    .modifiers = .{ .command = true, .shift = true },
+};
+
+// Module-level state
 var event_tap: ?c.CFMachPortRef = null;
 var run_loop_source: ?c.CFRunLoopSourceRef = null;
 var is_running: bool = false;
+var registered_hotkey: Hotkey = default_hotkey;
+var hotkey_callback: ?*const fn () void = null;
 
 // C-compatible callback
 fn eventTapCallback(
@@ -31,13 +77,19 @@ fn eventTapCallback(
         return event;
     }
 
-    // Print key events
-    if (event_type == c.kCGEventKeyDown or event_type == c.kCGEventKeyUp) {
+    // Only process key down events for hotkey detection
+    if (event_type == c.kCGEventKeyDown) {
         const keycode: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
-        std.debug.print("Key {s}: keycode={d}\n", .{
-            if (event_type == c.kCGEventKeyDown) "down" else "up",
-            keycode,
-        });
+        const flags = c.CGEventGetFlags(event);
+        const modifiers = Modifiers.fromCGEventFlags(flags);
+
+        // Check if hotkey matches
+        if (keycode == registered_hotkey.keycode and modifiers.matches(registered_hotkey.modifiers)) {
+            std.debug.print("Hotkey activated!\n", .{});
+            if (hotkey_callback) |cb| {
+                cb();
+            }
+        }
     }
 
     return event;
@@ -49,6 +101,16 @@ pub fn checkPermission() bool {
 
 pub fn requestPermission() void {
     _ = c.CGRequestListenEventAccess();
+}
+
+/// Set a custom hotkey (optional, defaults to Cmd+Shift+Space)
+pub fn setHotkey(hotkey: Hotkey) void {
+    registered_hotkey = hotkey;
+}
+
+/// Set callback function to be called when hotkey is activated
+pub fn setCallback(callback: ?*const fn () void) void {
+    hotkey_callback = callback;
 }
 
 pub fn init() HotkeyError!void {
@@ -95,4 +157,5 @@ pub fn deinit() void {
         event_tap = null;
     }
     is_running = false;
+    hotkey_callback = null;
 }
