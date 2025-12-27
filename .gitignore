@@ -1,0 +1,21 @@
+# Project files
+plan.md
+
+# Zig
+zig-cache/
+zig-out/
+.zig-cache/
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+*.o
+*.a
+*.dylib
+*.so

@@ -1,0 +1,16 @@
+.{
+    .name = .zignav,
+    .version = "0.1.0",
+    .fingerprint = 0xae613d47acf19c68,
+    .dependencies = .{
+        .objc = .{
+            .url = "https://github.com/mitchellh/zig-objc/archive/refs/heads/main.tar.gz",
+            .hash = "zig_objc-0.0.0-Ir_Sp5wTAQDuSB-PaIBSxNPhnQFT-H8UGd5kBAdnUaD4",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
