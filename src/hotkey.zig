@@ -103,6 +103,10 @@ pub fn requestPermission() void {
     _ = c.CGRequestListenEventAccess();
 }
 
+pub fn checkAccessibilityPermission() bool {
+    return c.AXIsProcessTrusted();
+}
+
 /// Set a custom hotkey (optional, defaults to Cmd+Shift+Space)
 pub fn setHotkey(hotkey: Hotkey) void {
     registered_hotkey = hotkey;
