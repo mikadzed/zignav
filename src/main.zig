@@ -1,9 +1,11 @@
 const std = @import("std");
+const posix = std.posix;
 const objc = @import("objc");
 const hotkey = @import("hotkey.zig");
 const accessibility = @import("accessibility.zig");
 const labels = @import("labels.zig");
 const overlay = @import("overlay.zig");
+const input = @import("input.zig");
 
 /// Get frontmost application PID using NSWorkspace
 fn getFrontmostAppPid() ?c.pid_t {
@@ -23,6 +25,15 @@ fn getFrontmostAppPid() ?c.pid_t {
 var global_gpa: ?std.heap.GeneralPurposeAllocator(.{}) = null;
 var overlay_label_infos: ?[]overlay.LabelInfo = null;
 var global_label_gen: ?labels.LabelGenerator = null;
+var global_clickable: ?[]accessibility.ClickableElement = null;
+var global_element_labels: ?[]const []const u8 = null;
+
+/// Dismiss the overlay and cleanup
+fn dismissOverlay() void {
+    overlay.hide();
+    input.deinit();
+    cleanupOverlayData();
+}
 
 /// Called when the hotkey (Cmd+Shift+Space) is activated
 fn onHotkeyActivated() void {
@@ -31,8 +42,7 @@ fn onHotkeyActivated() void {
     // Toggle overlay visibility
     if (overlay.isVisible()) {
         std.debug.print("Hiding overlay\n", .{});
-        overlay.hide();
-        cleanupOverlayData();
+        dismissOverlay();
         return;
     }
 
@@ -69,19 +79,28 @@ fn onHotkeyActivated() void {
     };
     defer main_window.deinit();
 
-    // Collect clickable elements
-    const clickable = accessibility.collectClickableElements(main_window, allocator, 15) catch |err| {
+    // Clean up previous clickable elements if any
+    if (global_clickable) |old_clickable| {
+        accessibility.freeClickableElements(allocator, old_clickable);
+        global_clickable = null;
+    }
+
+    // Collect clickable elements (depth 50 for deep web content in Electron apps)
+    const clickable = accessibility.collectClickableElements(main_window, allocator, 50) catch |err| {
         std.debug.print("Could not collect clickable elements: {}\n", .{err});
         return;
     };
-    defer accessibility.freeClickableElements(allocator, clickable);
 
     if (clickable.len == 0) {
         std.debug.print("No clickable elements found\n", .{});
+        accessibility.freeClickableElements(allocator, clickable);
         return;
     }
 
     std.debug.print("Found {} clickable elements\n", .{clickable.len});
+
+    // Store clickable elements globally for input handler
+    global_clickable = clickable;
 
     // Generate labels (use global generator so strings persist)
     if (global_label_gen != null) {
@@ -92,6 +111,9 @@ fn onHotkeyActivated() void {
         std.debug.print("Could not generate labels\n", .{});
         return;
     };
+
+    // Store labels globally for input handler
+    global_element_labels = element_labels;
 
     // Build LabelInfo array for overlay
     const label_infos = allocator.alloc(overlay.LabelInfo, clickable.len) catch {
@@ -109,6 +131,9 @@ fn onHotkeyActivated() void {
     // Store for later cleanup
     overlay_label_infos = label_infos;
 
+    // Initialize input handler with elements and labels
+    input.init(clickable, element_labels, allocator);
+
     // Show overlay
     overlay.show(label_infos, allocator) catch |err| {
         std.debug.print("Could not show overlay: {}\n", .{err});
@@ -123,12 +148,67 @@ fn cleanupOverlayData() void {
         global_label_gen.?.deinit();
         global_label_gen = null;
     }
+    global_element_labels = null;
+
     if (overlay_label_infos) |infos| {
         if (global_gpa) |*gpa| {
             gpa.allocator().free(infos);
         }
         overlay_label_infos = null;
     }
+
+    if (global_clickable) |clickable| {
+        if (global_gpa) |*gpa| {
+            accessibility.freeClickableElements(gpa.allocator(), clickable);
+        }
+        global_clickable = null;
+    }
+}
+
+/// Full cleanup on app termination
+fn cleanupAll() void {
+    std.debug.print("\nCleaning up...\n", .{});
+
+    // Hide overlay and cleanup input
+    if (overlay.isVisible()) {
+        overlay.hide();
+    }
+    input.deinit();
+    overlay.deinit();
+
+    // Cleanup overlay data
+    cleanupOverlayData();
+
+    // Cleanup hotkey
+    hotkey.deinit();
+
+    // Cleanup allocator
+    if (global_gpa) |*gpa| {
+        _ = gpa.deinit();
+        global_gpa = null;
+    }
+
+    std.debug.print("Cleanup complete.\n", .{});
+}
+
+/// Signal handler for SIGINT/SIGTERM
+fn handleSignal(sig: c_int) callconv(.c) void {
+    _ = sig;
+    // Stop the run loop
+    const cf_run_loop = @cImport(@cInclude("CoreFoundation/CoreFoundation.h"));
+    cf_run_loop.CFRunLoopStop(cf_run_loop.CFRunLoopGetCurrent());
+}
+
+/// Setup signal handlers
+fn setupSignalHandlers() void {
+    const act = posix.Sigaction{
+        .handler = .{ .handler = handleSignal },
+        .mask = 0,
+        .flags = 0,
+    };
+
+    posix.sigaction(posix.SIG.INT, &act, null);
+    posix.sigaction(posix.SIG.TERM, &act, null);
 }
 
 const c = @cImport({
@@ -170,17 +250,23 @@ pub fn main() !void {
 
     std.debug.print("All permissions granted.\n", .{});
 
-    // Register callback for hotkey activation
+    // Register callbacks
     hotkey.setCallback(onHotkeyActivated);
+    hotkey.setDismissCallback(dismissOverlay);
 
     std.debug.print("Listening for Cmd+Shift+Space (Ctrl+C to exit)...\n", .{});
+
+    // Setup signal handlers for clean shutdown
+    setupSignalHandlers();
 
     hotkey.init() catch |err| {
         std.debug.print("Error: {}\n", .{err});
         return;
     };
 
-    defer hotkey.deinit();
-
+    // Run the event loop (blocks until stopped)
     hotkey.run();
+
+    // Cleanup everything on exit
+    cleanupAll();
 }

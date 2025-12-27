@@ -1,4 +1,6 @@
 const std = @import("std");
+const input = @import("input.zig");
+const overlay = @import("overlay.zig");
 
 const c = @cImport({
     @cInclude("ApplicationServices/ApplicationServices.h");
@@ -60,6 +62,7 @@ var run_loop_source: ?c.CFRunLoopSourceRef = null;
 var is_running: bool = false;
 var registered_hotkey: Hotkey = default_hotkey;
 var hotkey_callback: ?*const fn () void = null;
+var dismiss_callback: ?*const fn () void = null;
 
 // C-compatible callback
 fn eventTapCallback(
@@ -77,17 +80,42 @@ fn eventTapCallback(
         return event;
     }
 
-    // Only process key down events for hotkey detection
+    // Only process key down events
     if (event_type == c.kCGEventKeyDown) {
         const keycode: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
         const flags = c.CGEventGetFlags(event);
         const modifiers = Modifiers.fromCGEventFlags(flags);
 
-        // Check if hotkey matches
+        // Check if hotkey matches (always check this first)
         if (keycode == registered_hotkey.keycode and modifiers.matches(registered_hotkey.modifiers)) {
             std.debug.print("Hotkey activated!\n", .{});
             if (hotkey_callback) |cb| {
                 cb();
+            }
+            // Consume the hotkey event
+            return null;
+        }
+
+        // If overlay is visible, forward key events to input handler
+        if (overlay.isVisible()) {
+            const result = input.handleKeyDown(keycode, modifiers.shift, modifiers.command);
+
+            switch (result) {
+                .consumed => return null, // Don't pass to app
+                .passthrough => return event, // Let it through
+                .dismiss => {
+                    if (dismiss_callback) |cb| {
+                        cb();
+                    }
+                    return null;
+                },
+                .execute => {
+                    // Execute happens inside input handler, then dismiss
+                    if (dismiss_callback) |cb| {
+                        cb();
+                    }
+                    return null;
+                },
             }
         }
     }
@@ -117,6 +145,11 @@ pub fn setCallback(callback: ?*const fn () void) void {
     hotkey_callback = callback;
 }
 
+/// Set callback function to be called when overlay should be dismissed
+pub fn setDismissCallback(callback: ?*const fn () void) void {
+    dismiss_callback = callback;
+}
+
 pub fn init() HotkeyError!void {
     if (!checkPermission()) return HotkeyError.AccessibilityNotGranted;
 
@@ -124,10 +157,11 @@ pub fn init() HotkeyError!void {
         (@as(c.CGEventMask, 1) << @intCast(c.kCGEventKeyDown)) |
         (@as(c.CGEventMask, 1) << @intCast(c.kCGEventKeyUp));
 
+    // Use kCGEventTapOptionDefault to be able to intercept (consume) events
     event_tap = c.CGEventTapCreate(
         c.kCGSessionEventTap,
         c.kCGHeadInsertEventTap,
-        c.kCGEventTapOptionListenOnly,
+        c.kCGEventTapOptionDefault,
         event_mask,
         eventTapCallback,
         null,

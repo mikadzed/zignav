@@ -376,6 +376,7 @@ pub const UIElement = struct {
 
 /// Roles that are considered clickable/interactive
 const CLICKABLE_ROLES = [_][*:0]const u8{
+    // Native macOS roles
     Role.button,
     Role.link,
     Role.checkBox,
@@ -394,6 +395,9 @@ const CLICKABLE_ROLES = [_][*:0]const u8{
     "AXComboBox",
     "AXColorWell",
     "AXSegmentedControl",
+    // Web/Electron specific roles (inside AXWebArea)
+    "AXImage",
+    "AXTextArea",
 };
 
 /// A clickable element with its frame
@@ -411,6 +415,27 @@ fn isClickableRole(role_str: c.CFStringRef) bool {
         defer if (cf_role != null) c.CFRelease(@ptrCast(cf_role));
 
         if (cf_role != null and c.CFEqual(@ptrCast(role_str), @ptrCast(cf_role)) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Check if an element supports the AXPress action (more reliable for web elements)
+fn supportsPressAction(element: UIElement) bool {
+    var actions: c.CFArrayRef = null;
+    const err = c.AXUIElementCopyActionNames(element.ref, &actions);
+    if (err != c.kAXErrorSuccess or actions == null) return false;
+    defer c.CFRelease(@ptrCast(actions));
+
+    const press_action = cfstr(Action.press);
+    defer if (press_action != null) c.CFRelease(@ptrCast(press_action));
+
+    const count = c.CFArrayGetCount(actions);
+    var i: c.CFIndex = 0;
+    while (i < count) : (i += 1) {
+        const action = c.CFArrayGetValueAtIndex(actions, i);
+        if (c.CFEqual(action, @ptrCast(press_action)) != 0) {
             return true;
         }
     }
@@ -444,22 +469,27 @@ fn collectClickableElementsRecursive(
 ) !void {
     if (depth > max_depth) return;
 
-    // Check if this element is clickable
+    // Check if this element is clickable (by role OR by having AXPress action)
     const role = element.getRole() catch null;
     defer if (role != null) c.CFRelease(@ptrCast(role));
 
-    if (isClickableRole(role)) {
-        // Get frame, skip if unavailable
+    const is_clickable = isClickableRole(role) or supportsPressAction(element);
+
+    if (is_clickable) {
+        // Get frame, skip if unavailable or too small
         const frame = element.getFrame() catch null;
         if (frame) |f| {
-            // Retain the element reference since we're storing it
-            if (element.ref != null) {
-                _ = c.CFRetain(@ptrCast(element.ref));
+            // Skip elements that are too small to be useful (< 5x5 pixels)
+            if (f.size.width >= 5 and f.size.height >= 5) {
+                // Retain the element reference since we're storing it
+                if (element.ref != null) {
+                    _ = c.CFRetain(@ptrCast(element.ref));
+                }
+                try result.append(allocator, .{
+                    .element = element,
+                    .frame = f,
+                });
             }
-            try result.append(allocator, .{
-                .element = element,
-                .frame = f,
-            });
         }
     }
 
