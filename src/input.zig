@@ -33,6 +33,7 @@ pub const InputResult = enum {
     passthrough, // Let the key through to the app
     dismiss, // Hide overlay and dismiss
     execute, // Execute action on matched element
+    menu_continue, // Execute action and re-scan for submenu items
 };
 
 /// Click action types
@@ -54,6 +55,10 @@ var allocator: ?std.mem.Allocator = null;
 var debounce_timer: ?c.CFRunLoopTimerRef = null;
 var pending_action_index: ?usize = null;
 var dismiss_callback_ptr: ?*const fn () void = null;
+var menu_continue_callback_ptr: ?*const fn () void = null;
+
+/// Menu mode - when true, actions return menu_continue instead of execute
+var is_menu_mode: bool = false;
 
 /// Timer callback - fires after debounce delay to execute single-letter action
 fn debounceTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) void {
@@ -62,9 +67,28 @@ fn debounceTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) vo
         executeAction(idx, .press);
         pending_action_index = null;
 
-        // Dismiss overlay after action
-        if (dismiss_callback_ptr) |cb| {
-            cb();
+        // In menu mode, only continue if the item has a submenu
+        if (is_menu_mode) {
+            const elements = current_elements orelse {
+                if (dismiss_callback_ptr) |cb| cb();
+                cancelDebounceTimer();
+                return;
+            };
+            const alloc = allocator orelse {
+                if (dismiss_callback_ptr) |cb| cb();
+                cancelDebounceTimer();
+                return;
+            };
+
+            if (idx < elements.len and elements[idx].element.hasSubmenu(alloc)) {
+                std.debug.print("Menu item has submenu - continuing\n", .{});
+                if (menu_continue_callback_ptr) |cb| cb();
+            } else {
+                std.debug.print("Menu item has no submenu - dismissing\n", .{});
+                if (dismiss_callback_ptr) |cb| cb();
+            }
+        } else {
+            if (dismiss_callback_ptr) |cb| cb();
         }
     }
     cancelDebounceTimer();
@@ -126,6 +150,21 @@ pub fn setDismissCallback(callback: ?*const fn () void) void {
     dismiss_callback_ptr = callback;
 }
 
+/// Set menu continue callback for menu navigation mode
+pub fn setMenuContinueCallback(callback: ?*const fn () void) void {
+    menu_continue_callback_ptr = callback;
+}
+
+/// Set menu mode - when true, executing an action triggers re-scan for submenus
+pub fn setMenuMode(enabled: bool) void {
+    is_menu_mode = enabled;
+}
+
+/// Check if menu mode is enabled
+pub fn getMenuMode() bool {
+    return is_menu_mode;
+}
+
 /// Reset input state (clear typed characters)
 pub fn reset() void {
     typed_len = 0;
@@ -140,6 +179,8 @@ pub fn deinit() void {
     current_labels = null;
     allocator = null;
     dismiss_callback_ptr = null;
+    menu_continue_callback_ptr = null;
+    is_menu_mode = false;
 }
 
 /// Get the current typed input
@@ -228,6 +269,19 @@ pub fn processLetter(char: u8) InputResult {
             selected_index = idx;
             std.debug.print("Exact unique match at index {} - executing\n", .{idx});
             executeAction(idx, .press);
+
+            // In menu mode, only continue if the item has a submenu
+            if (is_menu_mode) {
+                const elements = current_elements orelse return .execute;
+                const alloc = allocator orelse return .execute;
+                if (idx < elements.len and elements[idx].element.hasSubmenu(alloc)) {
+                    std.debug.print("Menu item has submenu - continuing\n", .{});
+                    return .menu_continue;
+                } else {
+                    std.debug.print("Menu item has no submenu - dismissing\n", .{});
+                    return .execute;
+                }
+            }
             return .execute;
         }
 

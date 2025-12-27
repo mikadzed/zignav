@@ -38,6 +38,9 @@ pub const ScanMode = enum {
     system_ui,
 };
 
+/// Delay before re-scanning for menu items (100ms)
+const MENU_RESCAN_DELAY: f64 = 0.1;
+
 /// Application context holding all state
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -47,6 +50,12 @@ pub const App = struct {
     clickable_elements: ?[]accessibility.ClickableElement,
     label_generator: ?labels.LabelGenerator,
     label_infos: ?[]overlay.LabelInfo,
+
+    // Menu navigation mode
+    is_menu_mode: bool,
+
+    // Timer for menu re-scan delay
+    menu_rescan_timer: ?c.CFRunLoopTimerRef,
 
     const Self = @This();
 
@@ -58,15 +67,27 @@ pub const App = struct {
             .clickable_elements = null,
             .label_generator = null,
             .label_infos = null,
+            .is_menu_mode = false,
+            .menu_rescan_timer = null,
         };
     }
 
     /// Cleanup all resources
     pub fn deinit(self: *Self) void {
+        self.cancelMenuRescanTimer();
         self.cleanupResources();
         overlay.deinit();
         input.deinit();
         hotkey.deinit();
+    }
+
+    /// Cancel any pending menu re-scan timer
+    fn cancelMenuRescanTimer(self: *Self) void {
+        if (self.menu_rescan_timer) |timer| {
+            c.CFRunLoopTimerInvalidate(timer);
+            c.CFRelease(@ptrCast(timer));
+            self.menu_rescan_timer = null;
+        }
     }
 
     /// Get current state
@@ -116,6 +137,131 @@ pub const App = struct {
         }
     }
 
+    /// Handle menu continue - schedule re-scan for submenu items
+    pub fn onMenuContinue(self: *Self) void {
+        if (self.state != .showing_labels) return;
+
+        std.debug.print("Menu continue - scheduling re-scan in {}ms\n", .{@as(u32, @intFromFloat(MENU_RESCAN_DELAY * 1000))});
+
+        // Cancel any existing timer
+        self.cancelMenuRescanTimer();
+
+        // Clean up current overlay and input state, but stay in showing_labels
+        overlay.hide();
+        input.reset();
+        self.cleanupResources();
+
+        // Schedule re-scan after delay to allow menu to render
+        var context = c.CFRunLoopTimerContext{
+            .version = 0,
+            .info = null,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+
+        const fire_time = c.CFAbsoluteTimeGetCurrent() + MENU_RESCAN_DELAY;
+        self.menu_rescan_timer = c.CFRunLoopTimerCreate(
+            c.kCFAllocatorDefault,
+            fire_time,
+            0, // Don't repeat
+            0,
+            0,
+            menuRescanTimerCallback,
+            &context,
+        );
+
+        if (self.menu_rescan_timer) |timer| {
+            c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopCommonModes);
+        }
+    }
+
+    /// Scan for visible menu items (called after menu re-scan timer fires)
+    fn scanMenuItems(self: *Self) void {
+        std.debug.print("\n=== Re-scanning for menu items ===\n", .{});
+
+        // Get frontmost app PID
+        const frontmost_pid = getFrontmostAppPid() orelse {
+            std.debug.print("Could not get frontmost app PID\n", .{});
+            self.transitionTo(.idle);
+            return;
+        };
+
+        // Collect visible menu items
+        const menu_elements = accessibility.collectVisibleMenuItems(self.allocator, frontmost_pid) catch |err| {
+            std.debug.print("Could not collect menu items: {}\n", .{err});
+            self.transitionTo(.idle);
+            return;
+        };
+
+        if (menu_elements.len == 0) {
+            std.debug.print("No menu items found - action complete, dismissing\n", .{});
+            accessibility.freeClickableElements(self.allocator, menu_elements);
+            self.is_menu_mode = false;
+            input.setMenuMode(false);
+            self.transitionTo(.idle);
+            return;
+        }
+
+        std.debug.print("Found {} menu items\n", .{menu_elements.len});
+
+        // Store elements
+        self.clickable_elements = menu_elements;
+
+        // Generate labels
+        self.label_generator = labels.LabelGenerator.init(self.allocator);
+        const element_labels = self.label_generator.?.generate(menu_elements.len) catch {
+            std.debug.print("Could not generate labels\n", .{});
+            self.cleanupResources();
+            self.transitionTo(.idle);
+            return;
+        };
+
+        // Build LabelInfo array
+        const label_infos = self.allocator.alloc(overlay.LabelInfo, menu_elements.len) catch {
+            std.debug.print("Could not allocate label infos\n", .{});
+            self.cleanupResources();
+            self.transitionTo(.idle);
+            return;
+        };
+
+        std.debug.print("\n--- Menu Item Labels ---\n", .{});
+        for (menu_elements, 0..) |elem, i| {
+            label_infos[i] = .{
+                .label = element_labels[i],
+                .x = elem.frame.origin.x + elem.frame.size.width / 2,
+                .top_y = elem.frame.origin.y,
+                .bottom_y = elem.frame.origin.y + elem.frame.size.height,
+            };
+
+            // Log the mapping
+            const title = elem.element.getTitle(self.allocator);
+            if (title) |t| {
+                defer self.allocator.free(t);
+                std.debug.print("[{s}] \"{s}\"\n", .{ element_labels[i], t });
+            } else {
+                std.debug.print("[{s}] (no title)\n", .{element_labels[i]});
+            }
+        }
+
+        self.label_infos = label_infos;
+
+        // Initialize input handler with menu mode
+        input.init(menu_elements, element_labels, self.allocator);
+        input.setMenuMode(true);
+
+        // Show overlay
+        overlay.show(label_infos, self.allocator) catch |err| {
+            std.debug.print("Could not show overlay: {}\n", .{err});
+            self.cleanupResources();
+            self.transitionTo(.idle);
+            return;
+        };
+
+        std.debug.print("Menu overlay shown with {} labels\n", .{label_infos.len});
+        // Stay in showing_labels state
+    }
+
     /// Transition to a new state
     fn transitionTo(self: *Self, new_state: State) void {
         const old_state = self.state;
@@ -141,7 +287,9 @@ pub const App = struct {
         // Entry actions for new state
         switch (new_state) {
             .idle => {
-                // Nothing to do
+                // Reset menu mode
+                self.is_menu_mode = false;
+                self.cancelMenuRescanTimer();
             },
             .scanning => {
                 // Scan happens immediately after transition
@@ -295,6 +443,12 @@ pub const App = struct {
         // Initialize input handler
         input.init(clickable, element_labels, self.allocator);
 
+        // Enable menu mode for system UI scan (to continue through submenus)
+        if (mode == .system_ui) {
+            self.is_menu_mode = true;
+            input.setMenuMode(true);
+        }
+
         // Show overlay
         overlay.show(label_infos, self.allocator) catch |err| {
             std.debug.print("Could not show overlay: {}\n", .{err});
@@ -407,5 +561,20 @@ pub fn dismissCallback() void {
 pub fn systemUICallback() void {
     if (global_app) |app| {
         app.onSystemUIActivated();
+    }
+}
+
+/// Callback for menu continue (re-scan for submenu items)
+pub fn menuContinueCallback() void {
+    if (global_app) |app| {
+        app.onMenuContinue();
+    }
+}
+
+/// Timer callback for menu re-scan - fires after delay to allow menu to render
+fn menuRescanTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) void {
+    if (global_app) |app| {
+        app.menu_rescan_timer = null; // Timer has fired, clear the reference
+        app.scanMenuItems();
     }
 }

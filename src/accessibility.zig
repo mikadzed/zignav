@@ -120,6 +120,10 @@ pub const Action = struct {
     pub const showMenu: [*:0]const u8 = "AXShowMenu";
 };
 
+pub const Subrole = struct {
+    pub const menuItem: [*:0]const u8 = "AXMenuItemMarkChar";
+};
+
 // ============================================================================
 // Geometry Types
 // ============================================================================
@@ -419,6 +423,19 @@ pub const UIElement = struct {
 
         // Set to true - errors are ignored as native apps don't support this attribute
         _ = c.AXUIElementSetAttributeValue(self.ref, attr, @ptrCast(c.kCFBooleanTrue));
+    }
+
+    /// Check if this menu item has a submenu (has AXMenu child)
+    pub fn hasSubmenu(self: UIElement, allocator: std.mem.Allocator) bool {
+        const children = self.getChildren(allocator) catch return false;
+        defer UIElement.freeElements(allocator, children);
+
+        for (children) |child| {
+            if (child.hasRole(Role.menu)) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 
@@ -742,5 +759,82 @@ fn collectDockItems(
 
     for (children) |child| {
         try collectDockItems(allocator, child, elements);
+    }
+}
+
+// ============================================================================
+// Visible Menu Item Collection (for cascading menu navigation)
+// ============================================================================
+
+/// Collect visible menu items from the frontmost application
+/// This is used after a menu bar item has been pressed to find the dropdown menu items
+pub fn collectVisibleMenuItems(
+    allocator: std.mem.Allocator,
+    frontmost_pid: c.pid_t,
+) ![]ClickableElement {
+    var menu_items = std.ArrayListUnmanaged(ClickableElement){};
+    errdefer {
+        for (menu_items.items) |elem| {
+            elem.element.deinit();
+        }
+        menu_items.deinit(allocator);
+    }
+
+    const app_element = UIElement.forApplication(frontmost_pid);
+    defer app_element.deinit();
+
+    // Get the menu bar and look for open menus
+    if (app_element.getMenuBar()) |menu_bar| {
+        defer menu_bar.deinit();
+
+        // Get menu bar children (menu bar items)
+        if (menu_bar.getChildren(allocator)) |menu_bar_items| {
+            defer UIElement.freeElements(allocator, menu_bar_items);
+
+            // Each menu bar item may have an AXMenu child when opened
+            for (menu_bar_items) |menu_bar_item| {
+                try collectMenuItemsFromElement(allocator, menu_bar_item, &menu_items);
+            }
+        } else |_| {}
+    } else |_| {}
+
+    std.debug.print("Found {} visible menu items\n", .{menu_items.items.len});
+    return menu_items.toOwnedSlice(allocator);
+}
+
+/// Recursively collect menu items from an element (looking for AXMenu and AXMenuItem)
+fn collectMenuItemsFromElement(
+    allocator: std.mem.Allocator,
+    element: UIElement,
+    items: *std.ArrayListUnmanaged(ClickableElement),
+) !void {
+    // Check if this element is a menu item with valid frame
+    if (element.hasRole(Role.menuItem)) {
+        const frame = element.getFrame() catch return;
+
+        // Skip items with zero/invalid size
+        if (frame.size.width > 0 and frame.size.height > 0) {
+            // Check if it has AXPress action (some menu items are just separators)
+            if (element.canPerformAction(Action.press)) {
+                const retained = element.retain();
+                try items.append(allocator, .{
+                    .element = retained,
+                    .frame = frame,
+                });
+            }
+        }
+    }
+
+    // Check if this is a menu (container for menu items)
+    const is_menu = element.hasRole(Role.menu);
+
+    // If it's a menu or menu bar item, look for children
+    if (is_menu or element.hasRole(Role.menuBarItem)) {
+        const children = element.getChildren(allocator) catch return;
+        defer UIElement.freeElements(allocator, children);
+
+        for (children) |child| {
+            try collectMenuItemsFromElement(allocator, child, items);
+        }
     }
 }

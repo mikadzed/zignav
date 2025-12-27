@@ -82,9 +82,11 @@ pub fn main() !void {
     hotkey.setCallback(app.hotkeyCallback);
     hotkey.setSystemUICallback(app.systemUICallback);
     hotkey.setDismissCallback(app.dismissCallback);
+    hotkey.setMenuContinueCallback(app.menuContinueCallback);
 
-    // Set dismiss callback for input handler (timer-triggered actions)
+    // Set callbacks for input handler (timer-triggered actions)
     input.setDismissCallback(app.dismissCallback);
+    input.setMenuContinueCallback(app.menuContinueCallback);
 
     std.debug.print("Hotkeys:\n", .{});
     std.debug.print("  Cmd+Shift+Space  - Scan frontmost app\n", .{});

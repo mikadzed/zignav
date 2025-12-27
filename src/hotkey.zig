@@ -70,6 +70,7 @@ var registered_hotkey: Hotkey = default_hotkey;
 var hotkey_callback: ?*const fn () void = null;
 var system_ui_callback: ?*const fn () void = null;
 var dismiss_callback: ?*const fn () void = null;
+var menu_continue_callback: ?*const fn () void = null;
 
 // C-compatible callback
 fn eventTapCallback(
@@ -131,6 +132,13 @@ fn eventTapCallback(
                     }
                     return null;
                 },
+                .menu_continue => {
+                    // Execute happened, now re-scan for submenu items
+                    if (menu_continue_callback) |cb| {
+                        cb();
+                    }
+                    return null;
+                },
             }
         }
     }
@@ -168,6 +176,11 @@ pub fn setSystemUICallback(callback: ?*const fn () void) void {
 /// Set callback function to be called when overlay should be dismissed
 pub fn setDismissCallback(callback: ?*const fn () void) void {
     dismiss_callback = callback;
+}
+
+/// Set callback function to be called when menu navigation should continue (re-scan for submenus)
+pub fn setMenuContinueCallback(callback: ?*const fn () void) void {
+    menu_continue_callback = callback;
 }
 
 pub fn init() HotkeyError!void {
