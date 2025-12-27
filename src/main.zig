@@ -2,20 +2,8 @@ const std = @import("std");
 const objc = @import("objc");
 const hotkey = @import("hotkey.zig");
 const accessibility = @import("accessibility.zig");
-
-/// Recursively count all UI elements in the tree
-fn countElements(element: accessibility.UIElement, allocator: std.mem.Allocator, depth: usize) usize {
-    if (depth > 20) return 1; // Prevent infinite recursion
-
-    const children = element.getChildren(allocator) catch return 1;
-    defer accessibility.UIElement.freeElements(allocator, children);
-
-    var count: usize = 1;
-    for (children) |child| {
-        count += countElements(child, allocator, depth + 1);
-    }
-    return count;
-}
+const labels = @import("labels.zig");
+const overlay = @import("overlay.zig");
 
 /// Get frontmost application PID using NSWorkspace
 fn getFrontmostAppPid() ?c.pid_t {
@@ -31,90 +19,116 @@ fn getFrontmostAppPid() ?c.pid_t {
     return @intCast(pid);
 }
 
+// Persistent state for overlay (needs to outlive the callback)
+var global_gpa: ?std.heap.GeneralPurposeAllocator(.{}) = null;
+var overlay_label_infos: ?[]overlay.LabelInfo = null;
+var global_label_gen: ?labels.LabelGenerator = null;
+
 /// Called when the hotkey (Cmd+Shift+Space) is activated
 fn onHotkeyActivated() void {
     std.debug.print("\n=== ZigNav Activated ===\n", .{});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Toggle overlay visibility
+    if (overlay.isVisible()) {
+        std.debug.print("Hiding overlay\n", .{});
+        overlay.hide();
+        cleanupOverlayData();
+        return;
+    }
 
-    // Get frontmost app PID via NSWorkspace (more reliable than AXFocusedApplication)
+    // Initialize allocator if needed
+    if (global_gpa == null) {
+        global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    }
+    const allocator = global_gpa.?.allocator();
+
+    // Get frontmost app PID via NSWorkspace
     const pid = getFrontmostAppPid() orelse {
         std.debug.print("Could not get frontmost app PID\n", .{});
         return;
     };
-    std.debug.print("Frontmost app PID: {}\n", .{pid});
 
     // Create accessibility element for this app
     const focused_app = accessibility.UIElement.forApplication(pid);
     defer focused_app.deinit();
 
-    // Get app title
+    // Enable manual accessibility for Electron apps
+    // This forces Electron to populate its accessibility tree with DOM elements
+    focused_app.enableManualAccessibility();
+
+    // Get app title for logging
     if (focused_app.getTitle(allocator)) |title| {
         defer allocator.free(title);
-        std.debug.print("Focused app: {s}\n", .{title});
-    } else {
-        std.debug.print("Focused app: (unknown)\n", .{});
+        std.debug.print("App: {s}\n", .{title});
     }
 
     // Get main window
     const main_window = focused_app.getMainWindow() catch |err| {
         std.debug.print("Could not get main window: {}\n", .{err});
-
-        // Try getting all windows instead
-        std.debug.print("Trying to list all windows...\n", .{});
-        const windows = focused_app.getWindows(allocator) catch |werr| {
-            std.debug.print("Could not get windows list: {}\n", .{werr});
-            return;
-        };
-        defer accessibility.UIElement.freeElements(allocator, windows);
-
-        std.debug.print("App has {} windows\n", .{windows.len});
-        for (windows, 0..) |win, i| {
-            if (win.getTitle(allocator)) |title| {
-                defer allocator.free(title);
-                std.debug.print("  Window {}: {s}\n", .{ i, title });
-            } else {
-                std.debug.print("  Window {}: (no title)\n", .{i});
-            }
-        }
         return;
     };
     defer main_window.deinit();
 
-    // Get window title
-    if (main_window.getTitle(allocator)) |title| {
-        defer allocator.free(title);
-        std.debug.print("Main window: {s}\n", .{title});
+    // Collect clickable elements
+    const clickable = accessibility.collectClickableElements(main_window, allocator, 15) catch |err| {
+        std.debug.print("Could not collect clickable elements: {}\n", .{err});
+        return;
+    };
+    defer accessibility.freeClickableElements(allocator, clickable);
+
+    if (clickable.len == 0) {
+        std.debug.print("No clickable elements found\n", .{});
+        return;
     }
 
-    // Get window frame
-    const frame = main_window.getFrame() catch |err| {
-        std.debug.print("Could not get window frame: {}\n", .{err});
+    std.debug.print("Found {} clickable elements\n", .{clickable.len});
+
+    // Generate labels (use global generator so strings persist)
+    if (global_label_gen != null) {
+        global_label_gen.?.deinit();
+    }
+    global_label_gen = labels.LabelGenerator.init(allocator);
+    const element_labels = global_label_gen.?.generate(clickable.len) catch {
+        std.debug.print("Could not generate labels\n", .{});
         return;
     };
-    std.debug.print("Window at ({d:.0}, {d:.0}) size {d:.0}x{d:.0}\n", .{
-        frame.origin.x,
-        frame.origin.y,
-        frame.size.width,
-        frame.size.height,
-    });
 
-    // Count all UI elements recursively
-    const total_elements = countElements(main_window, allocator, 0);
-    std.debug.print("Total UI elements in tree: {}\n", .{total_elements});
-
-    // Get direct children
-    const children = main_window.getChildren(allocator) catch {
-        std.debug.print("Could not get children\n", .{});
+    // Build LabelInfo array for overlay
+    const label_infos = allocator.alloc(overlay.LabelInfo, clickable.len) catch {
+        std.debug.print("Could not allocate label infos\n", .{});
         return;
     };
-    defer accessibility.UIElement.freeElements(allocator, children);
 
-    std.debug.print("Window has {} direct children\n", .{children.len});
+    for (clickable, 0..) |elem, i| {
+        label_infos[i] = .{
+            .label = element_labels[i],
+            .center = elem.frame.center(),
+        };
+    }
 
-    std.debug.print("========================\n\n", .{});
+    // Store for later cleanup
+    overlay_label_infos = label_infos;
+
+    // Show overlay
+    overlay.show(label_infos, allocator) catch |err| {
+        std.debug.print("Could not show overlay: {}\n", .{err});
+        return;
+    };
+
+    std.debug.print("Overlay shown with {} labels\n", .{label_infos.len});
+}
+
+fn cleanupOverlayData() void {
+    if (global_label_gen != null) {
+        global_label_gen.?.deinit();
+        global_label_gen = null;
+    }
+    if (overlay_label_infos) |infos| {
+        if (global_gpa) |*gpa| {
+            gpa.allocator().free(infos);
+        }
+        overlay_label_infos = null;
+    }
 }
 
 const c = @cImport({

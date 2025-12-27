@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) void {
     exe.linkFramework("AppKit");
     exe.linkFramework("CoreGraphics");
     exe.linkFramework("CoreFoundation");
+    exe.linkFramework("QuartzCore");
 
     b.installArtifact(exe);
 
@@ -40,4 +41,18 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_cmd.step);
+
+    // Test step
+    const labels_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/labels.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_labels_tests = b.addRunArtifact(labels_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_labels_tests.step);
 }

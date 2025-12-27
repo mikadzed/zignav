@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("ApplicationServices/ApplicationServices.h");
 });
 
@@ -349,7 +349,136 @@ pub const UIElement = struct {
         const err = c.AXUIElementPerformAction(self.ref, action_str);
         try axErrorToZig(err);
     }
+
+    /// Set an attribute value on the element
+    pub fn setAttributeValue(self: UIElement, attribute: [*:0]const u8, value: c.CFTypeRef) AccessibilityError!void {
+        const attr_str = cfstr(attribute);
+        defer if (attr_str != null) c.CFRelease(@ptrCast(attr_str));
+
+        const err = c.AXUIElementSetAttributeValue(self.ref, attr_str, value);
+        try axErrorToZig(err);
+    }
+
+    /// Enable manual accessibility for Electron apps
+    /// This forces Electron to populate its accessibility tree with DOM elements
+    pub fn enableManualAccessibility(self: UIElement) void {
+        const attr = cfstr("AXManualAccessibility");
+        defer if (attr != null) c.CFRelease(@ptrCast(attr));
+
+        // Set to true - errors are ignored as native apps don't support this attribute
+        _ = c.AXUIElementSetAttributeValue(self.ref, attr, @ptrCast(c.kCFBooleanTrue));
+    }
 };
+
+// ============================================================================
+// Clickable Element Collection
+// ============================================================================
+
+/// Roles that are considered clickable/interactive
+const CLICKABLE_ROLES = [_][*:0]const u8{
+    Role.button,
+    Role.link,
+    Role.checkBox,
+    Role.radioButton,
+    Role.popUpButton,
+    Role.menuButton,
+    Role.textField,
+    Role.cell,
+    Role.row,
+    "AXMenuItem",
+    "AXMenuBarItem",
+    "AXTab",
+    "AXDisclosureTriangle",
+    "AXIncrementor",
+    "AXSlider",
+    "AXComboBox",
+    "AXColorWell",
+    "AXSegmentedControl",
+};
+
+/// A clickable element with its frame
+pub const ClickableElement = struct {
+    element: UIElement,
+    frame: Rect,
+};
+
+/// Check if a role string matches any clickable role
+fn isClickableRole(role_str: c.CFStringRef) bool {
+    if (role_str == null) return false;
+
+    for (CLICKABLE_ROLES) |clickable_role| {
+        const cf_role = cfstr(clickable_role);
+        defer if (cf_role != null) c.CFRelease(@ptrCast(cf_role));
+
+        if (cf_role != null and c.CFEqual(@ptrCast(role_str), @ptrCast(cf_role)) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Recursively collect clickable elements from the UI tree
+pub fn collectClickableElements(
+    root: UIElement,
+    allocator: std.mem.Allocator,
+    max_depth: usize,
+) ![]ClickableElement {
+    var elements = std.ArrayListUnmanaged(ClickableElement){};
+    errdefer {
+        for (elements.items) |elem| {
+            elem.element.deinit();
+        }
+        elements.deinit(allocator);
+    }
+
+    try collectClickableElementsRecursive(root, allocator, &elements, 0, max_depth);
+    return elements.toOwnedSlice(allocator);
+}
+
+fn collectClickableElementsRecursive(
+    element: UIElement,
+    allocator: std.mem.Allocator,
+    result: *std.ArrayListUnmanaged(ClickableElement),
+    depth: usize,
+    max_depth: usize,
+) !void {
+    if (depth > max_depth) return;
+
+    // Check if this element is clickable
+    const role = element.getRole() catch null;
+    defer if (role != null) c.CFRelease(@ptrCast(role));
+
+    if (isClickableRole(role)) {
+        // Get frame, skip if unavailable
+        const frame = element.getFrame() catch null;
+        if (frame) |f| {
+            // Retain the element reference since we're storing it
+            if (element.ref != null) {
+                _ = c.CFRetain(@ptrCast(element.ref));
+            }
+            try result.append(allocator, .{
+                .element = element,
+                .frame = f,
+            });
+        }
+    }
+
+    // Recurse into children
+    const children = element.getChildren(allocator) catch return;
+    defer UIElement.freeElements(allocator, children);
+
+    for (children) |child| {
+        try collectClickableElementsRecursive(child, allocator, result, depth + 1, max_depth);
+    }
+}
+
+/// Free collected clickable elements
+pub fn freeClickableElements(allocator: std.mem.Allocator, elements: []ClickableElement) void {
+    for (elements) |elem| {
+        elem.element.deinit();
+    }
+    allocator.free(elements);
+}
 
 // ============================================================================
 // Permission Helpers
