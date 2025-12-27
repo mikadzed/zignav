@@ -30,6 +30,8 @@ pub const LabelGenerator = struct {
 
     /// Generate labels for N elements
     /// Returns slice of label strings (caller should not free individual labels)
+    /// Uses single letters first (a, s, d...), then double letters (aa, as, ad...)
+    /// Each label is guaranteed unique
     pub fn generate(self: *LabelGenerator, count: usize) ![]const []const u8 {
         // Clear any existing labels
         for (self.labels.items) |label| {
@@ -39,33 +41,29 @@ pub const LabelGenerator = struct {
 
         if (count == 0) return &[_][]const u8{};
 
-        // For small counts, use single characters
-        if (count <= LABEL_CHARS.len) {
-            for (0..count) |i| {
-                const label = try self.allocator.alloc(u8, 1);
-                label[0] = LABEL_CHARS[i];
-                try self.labels.append(self.allocator, label);
-            }
-        } else {
-            // For larger counts, use two-character labels
-            // First, use all single chars
-            for (0..LABEL_CHARS.len) |i| {
-                const label = try self.allocator.alloc(u8, 1);
-                label[0] = LABEL_CHARS[i];
-                try self.labels.append(self.allocator, label);
-            }
+        var generated: usize = 0;
 
-            // Then generate double-char labels
-            var remaining = count - LABEL_CHARS.len;
+        // Phase 1: Single character labels (a, s, d, f, j, k, l, g, h, e, i, w, o, q, p, r, u, v, n, c, m, x, z, t, y, b)
+        for (LABEL_CHARS) |char| {
+            if (generated >= count) break;
+
+            const label = try self.allocator.alloc(u8, 1);
+            label[0] = char;
+            try self.labels.append(self.allocator, label);
+            generated += 1;
+        }
+
+        // Phase 2: Double character labels (aa, as, ad, ...)
+        if (generated < count) {
             outer: for (LABEL_CHARS) |first| {
                 for (LABEL_CHARS) |second| {
-                    if (remaining == 0) break :outer;
+                    if (generated >= count) break :outer;
 
                     const label = try self.allocator.alloc(u8, 2);
                     label[0] = first;
                     label[1] = second;
                     try self.labels.append(self.allocator, label);
-                    remaining -= 1;
+                    generated += 1;
                 }
             }
         }
@@ -129,14 +127,18 @@ test "generate double char labels for many elements" {
     const labels = try gen.generate(30);
     try std.testing.expectEqual(@as(usize, 30), labels.len);
 
-    // First 26 should be single chars
+    // First 26 are single chars
     try std.testing.expectEqual(@as(usize, 1), labels[0].len);
+    try std.testing.expectEqualStrings("a", labels[0]);
     try std.testing.expectEqual(@as(usize, 1), labels[25].len);
+    try std.testing.expectEqualStrings("b", labels[25]);
 
-    // 27+ should be double chars
+    // After 26, double chars start
     try std.testing.expectEqual(@as(usize, 2), labels[26].len);
     try std.testing.expectEqualStrings("aa", labels[26]);
     try std.testing.expectEqualStrings("as", labels[27]);
+    try std.testing.expectEqualStrings("ad", labels[28]);
+    try std.testing.expectEqualStrings("af", labels[29]);
 }
 
 test "home row keys come first" {

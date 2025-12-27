@@ -8,10 +8,15 @@ const overlay = @import("overlay.zig");
 // ============================================================================
 // Handles keyboard input when the overlay is visible.
 // Matches typed characters to labels and executes click actions.
+// Uses debounce (100ms) to distinguish single vs double letter labels.
 
 const c = @cImport({
     @cInclude("ApplicationServices/ApplicationServices.h");
+    @cInclude("CoreFoundation/CoreFoundation.h");
 });
+
+/// Debounce delay in seconds (200ms)
+const DEBOUNCE_DELAY: f64 = 0.2;
 
 /// Key codes for special keys
 pub const Keycode = struct {
@@ -45,6 +50,65 @@ var current_labels: ?[]const []const u8 = null;
 var selected_index: ?usize = null;
 var allocator: ?std.mem.Allocator = null;
 
+/// Debounce timer state
+var debounce_timer: ?c.CFRunLoopTimerRef = null;
+var pending_action_index: ?usize = null;
+var dismiss_callback_ptr: ?*const fn () void = null;
+
+/// Timer callback - fires after debounce delay to execute single-letter action
+fn debounceTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) void {
+    if (pending_action_index) |idx| {
+        std.debug.print("Debounce timer fired - executing action on index {}\n", .{idx});
+        executeAction(idx, .press);
+        pending_action_index = null;
+
+        // Dismiss overlay after action
+        if (dismiss_callback_ptr) |cb| {
+            cb();
+        }
+    }
+    cancelDebounceTimer();
+}
+
+/// Start debounce timer for potential single-letter match
+fn startDebounceTimer(action_index: usize) void {
+    cancelDebounceTimer();
+    pending_action_index = action_index;
+
+    var context = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = null,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+
+    const fire_time = c.CFAbsoluteTimeGetCurrent() + DEBOUNCE_DELAY;
+    debounce_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault,
+        fire_time,
+        0, // Don't repeat
+        0,
+        0,
+        debounceTimerCallback,
+        &context,
+    );
+
+    if (debounce_timer) |timer| {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopCommonModes);
+    }
+}
+
+/// Cancel any pending debounce timer
+fn cancelDebounceTimer() void {
+    if (debounce_timer) |timer| {
+        c.CFRunLoopTimerInvalidate(timer);
+        c.CFRelease(@ptrCast(timer));
+        debounce_timer = null;
+    }
+    pending_action_index = null;
+}
+
 /// Initialize the input handler with element and label data
 pub fn init(
     elements: []accessibility.ClickableElement,
@@ -57,10 +121,16 @@ pub fn init(
     reset();
 }
 
+/// Set dismiss callback for timer-triggered actions
+pub fn setDismissCallback(callback: ?*const fn () void) void {
+    dismiss_callback_ptr = callback;
+}
+
 /// Reset input state (clear typed characters)
 pub fn reset() void {
     typed_len = 0;
     selected_index = null;
+    cancelDebounceTimer();
 }
 
 /// Deinitialize
@@ -69,6 +139,7 @@ pub fn deinit() void {
     current_elements = null;
     current_labels = null;
     allocator = null;
+    dismiss_callback_ptr = null;
 }
 
 /// Get the current typed input
@@ -129,13 +200,17 @@ pub fn processLetter(char: u8) InputResult {
     const lower = if (char >= 'A' and char <= 'Z') char + 32 else char;
     if (lower < 'a' or lower > 'z') return .passthrough;
 
+    // Cancel any pending debounce timer - user is typing more
+    cancelDebounceTimer();
+
     // Check if adding this char would still have matches
     if (typed_len < typed_input.len - 1) {
         typed_input[typed_len] = lower;
         typed_len += 1;
 
+        const input = typed_input[0..typed_len];
         const matches = countMatches();
-        std.debug.print("Typed: '{s}', matches: {}\n", .{ typed_input[0..typed_len], matches });
+        std.debug.print("Typed: '{s}', matches: {}\n", .{ input, matches });
 
         if (matches == 0) {
             // No matches - undo and ignore
@@ -143,19 +218,29 @@ pub fn processLetter(char: u8) InputResult {
             return .consumed;
         }
 
-        // Only auto-execute when there's exactly ONE matching label
-        // This allows typing "aa" even when "a" exists
-        if (matches == 1) {
-            // Find the single matching label
-            if (findUniquePrefixMatch()) |idx| {
-                selected_index = idx;
-                std.debug.print("Unique match found at index {}\n", .{idx});
-                executeAction(idx, .press);
-                return .execute;
-            }
+        // Check for exact match
+        const exact_match_idx = findExactMatch();
+        const has_exact = exact_match_idx != null;
+
+        if (matches == 1 and has_exact) {
+            // Only one match and it's exact - execute immediately
+            const idx = exact_match_idx.?;
+            selected_index = idx;
+            std.debug.print("Exact unique match at index {} - executing\n", .{idx});
+            executeAction(idx, .press);
+            return .execute;
         }
 
-        // Update overlay to show filtered labels
+        if (has_exact and matches > 1) {
+            // Exact match exists but there are also longer labels (e.g., "a" matches but "aa", "ab" also exist)
+            // Start debounce timer - if no more keys within 100ms, execute the exact match
+            const idx = exact_match_idx.?;
+            std.debug.print("Exact match at index {} with {} total matches - starting debounce\n", .{ idx, matches });
+            startDebounceTimer(idx);
+            return .consumed;
+        }
+
+        // No exact match yet, just update display
         updateOverlayHighlights();
     }
 
@@ -164,6 +249,7 @@ pub fn processLetter(char: u8) InputResult {
 
 /// Process delete/backspace key
 pub fn processDelete() InputResult {
+    cancelDebounceTimer();
     if (typed_len > 0) {
         typed_len -= 1;
         std.debug.print("Deleted, typed: '{s}'\n", .{typed_input[0..typed_len]});
@@ -174,6 +260,7 @@ pub fn processDelete() InputResult {
 
 /// Process escape key
 pub fn processEscape() InputResult {
+    cancelDebounceTimer();
     std.debug.print("Escape pressed - dismissing overlay\n", .{});
     return .dismiss;
 }
@@ -200,7 +287,14 @@ pub fn processReturn(modifiers: struct { shift: bool = false, cmd: bool = false 
         return .dismiss;
     }
 
-    // If we have exactly one match, execute on that
+    // Check for exact match first (e.g., "f" when there's also "fa", "fb", etc.)
+    if (findExactMatch()) |idx| {
+        std.debug.print("Exact match on Return: index {}\n", .{idx});
+        executeAction(idx, action);
+        return .dismiss;
+    }
+
+    // If we have exactly one prefix match, execute on that
     if (findUniquePrefixMatch()) |idx| {
         executeAction(idx, action);
         return .dismiss;

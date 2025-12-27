@@ -16,7 +16,8 @@ const c = @cImport({
 /// Label with its position for rendering
 pub const LabelInfo = struct {
     label: []const u8,
-    center: accessibility.Position,
+    x: f64, // Center X of element
+    bottom_y: f64, // Bottom Y of element (for popunder positioning)
 };
 
 /// The overlay window and content view
@@ -152,18 +153,19 @@ fn createLabelField(info: LabelInfo) !void {
 
     // macOS coordinate system has origin at bottom-left, need to flip Y
     const screen_height = getScreenHeight();
-    const flipped_y = screen_height - info.center.y;
 
-    // Calculate label dimensions
-    const font_size: f64 = 12;
-    const padding: f64 = 3;
-    const char_width: f64 = 8;
-    const width: f64 = @as(f64, @floatFromInt(info.label.len)) * char_width + padding * 2;
-    const height: f64 = font_size + padding * 2 + 2;
+    // Label dimensions - fixed size for consistency (fits 2 chars)
+    const font_size: f64 = 13;
+    const padding_v: f64 = 2;
+    const width: f64 = 28; // Fixed width for all boxes
+    const height: f64 = font_size + padding_v * 2 + 4;
 
-    // Position centered on element
-    const x = info.center.x - width / 2;
-    const y = flipped_y - height / 2;
+    // Position as popunder: label TOP at element BOTTOM, centered horizontally
+    const x = info.x - width / 2;
+    // In flipped coords: element bottom_y becomes (screen_height - bottom_y)
+    // We want label TOP at that point, so label origin is at (screen_height - bottom_y - height)
+    const flipped_bottom = screen_height - info.bottom_y;
+    const y = flipped_bottom - height - 2; // 2px gap below element
 
     const frame = c.CGRect{
         .origin = .{ .x = x, .y = y },
@@ -195,19 +197,24 @@ fn createLabelField(info: LabelInfo) !void {
     field.msgSend(void, "setSelectable:", .{@as(c_int, 0)});
     field.msgSend(void, "setAlignment:", .{@as(c_ulong, 1)}); // NSTextAlignmentCenter
 
-    // Yellow background
-    const yellow = NSColor.msgSend(
+    // #fdf4b7 background with slight transparency
+    // RGB: 253/255=0.992, 244/255=0.957, 183/255=0.718
+    const bg_color = NSColor.msgSend(
         objc.Object,
         "colorWithRed:green:blue:alpha:",
-        .{ @as(f64, 1.0), @as(f64, 0.9), @as(f64, 0.0), @as(f64, 0.95) },
+        .{ @as(f64, 0.992), @as(f64, 0.957), @as(f64, 0.718), @as(f64, 0.85) },
     );
-    field.msgSend(void, "setBackgroundColor:", .{yellow.value});
+    field.msgSend(void, "setBackgroundColor:", .{bg_color.value});
 
-    // Black text
-    const black = NSColor.msgSend(objc.Object, "blackColor", .{});
-    field.msgSend(void, "setTextColor:", .{black.value});
+    // Dark gray text for better readability
+    const text_color = NSColor.msgSend(
+        objc.Object,
+        "colorWithRed:green:blue:alpha:",
+        .{ @as(f64, 0.2), @as(f64, 0.2), @as(f64, 0.2), @as(f64, 1.0) },
+    );
+    field.msgSend(void, "setTextColor:", .{text_color.value});
 
-    // Bold font
+    // Bold font (smaller)
     const font = NSFont.msgSend(
         objc.Object,
         "boldSystemFontOfSize:",
@@ -218,19 +225,17 @@ fn createLabelField(info: LabelInfo) !void {
     // Add border via layer
     field.msgSend(void, "setWantsLayer:", .{@as(c_int, 1)});
     const layer = field.msgSend(objc.Object, "layer", .{});
-    layer.msgSend(void, "setBorderWidth:", .{@as(f64, 1.0)});
+    layer.msgSend(void, "setBorderWidth:", .{@as(f64, 0.5)});
 
-    // Border color (black via CGColor)
-    const blackCG = c.CGColorCreateGenericRGB(0, 0, 0, 1);
-    defer c.CGColorRelease(blackCG);
-    layer.msgSend(void, "setBorderColor:", .{blackCG});
+    // Subtle border color
+    const borderCG = c.CGColorCreateGenericRGB(0.4, 0.4, 0.4, 0.6);
+    defer c.CGColorRelease(borderCG);
+    layer.msgSend(void, "setBorderColor:", .{borderCG});
 
-    layer.msgSend(void, "setCornerRadius:", .{@as(f64, 3.0)});
+    layer.msgSend(void, "setCornerRadius:", .{@as(f64, 2.0)});
 
     // Add to content view
     view.msgSend(void, "addSubview:", .{field.value});
-
-    std.debug.print("  Label '{s}' at ({d:.0}, {d:.0})\n", .{ info.label, x, y });
 
     // Track the field
     if (label_allocator) |alloc| {

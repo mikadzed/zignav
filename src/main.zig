@@ -102,6 +102,9 @@ fn onHotkeyActivated() void {
     // Store clickable elements globally for input handler
     global_clickable = clickable;
 
+    // Log each element with its assigned label
+    std.debug.print("\n--- Element to Label Mapping ---\n", .{});
+
     // Generate labels (use global generator so strings persist)
     if (global_label_gen != null) {
         global_label_gen.?.deinit();
@@ -124,8 +127,31 @@ fn onHotkeyActivated() void {
     for (clickable, 0..) |elem, i| {
         label_infos[i] = .{
             .label = element_labels[i],
-            .center = elem.frame.center(),
+            .x = elem.frame.origin.x + elem.frame.size.width / 2, // Center X
+            .bottom_y = elem.frame.origin.y + elem.frame.size.height, // Bottom Y
         };
+
+        // Log label -> element mapping
+        const title = elem.element.getTitle(allocator);
+        if (title) |t| {
+            defer allocator.free(t);
+            std.debug.print("[{s}] \"{s}\" at ({d:.0}, {d:.0}) {d:.0}x{d:.0}\n", .{
+                element_labels[i],
+                t,
+                elem.frame.origin.x,
+                elem.frame.origin.y,
+                elem.frame.size.width,
+                elem.frame.size.height,
+            });
+        } else {
+            std.debug.print("[{s}] (no title) at ({d:.0}, {d:.0}) {d:.0}x{d:.0}\n", .{
+                element_labels[i],
+                elem.frame.origin.x,
+                elem.frame.origin.y,
+                elem.frame.size.width,
+                elem.frame.size.height,
+            });
+        }
     }
 
     // Store for later cleanup
@@ -133,6 +159,7 @@ fn onHotkeyActivated() void {
 
     // Initialize input handler with elements and labels
     input.init(clickable, element_labels, allocator);
+    input.setDismissCallback(dismissOverlay);
 
     // Show overlay
     overlay.show(label_infos, allocator) catch |err| {

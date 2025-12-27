@@ -457,7 +457,44 @@ pub fn collectClickableElements(
     }
 
     try collectClickableElementsRecursive(root, allocator, &elements, 0, max_depth);
-    return elements.toOwnedSlice(allocator);
+
+    // Deduplicate elements that are at the same position (nested clickables)
+    var deduped = std.ArrayListUnmanaged(ClickableElement){};
+    errdefer {
+        for (deduped.items) |elem| {
+            elem.element.deinit();
+        }
+        deduped.deinit(allocator);
+    }
+
+    for (elements.items) |elem| {
+        var dominated = false;
+        // Check if another element at same position exists with better size
+        for (deduped.items) |existing| {
+            if (framesOverlap(elem.frame, existing.frame)) {
+                dominated = true;
+                break;
+            }
+        }
+        if (!dominated) {
+            try deduped.append(allocator, elem);
+        } else {
+            // Release the duplicate element
+            elem.element.deinit();
+        }
+    }
+
+    elements.deinit(allocator);
+    return deduped.toOwnedSlice(allocator);
+}
+
+/// Check if two frames significantly overlap (likely same element)
+fn framesOverlap(a: Rect, b: Rect) bool {
+    const tolerance: f64 = 10; // pixels
+    return @abs(a.origin.x - b.origin.x) < tolerance and
+        @abs(a.origin.y - b.origin.y) < tolerance and
+        @abs(a.size.width - b.size.width) < tolerance and
+        @abs(a.size.height - b.size.height) < tolerance;
 }
 
 fn collectClickableElementsRecursive(
