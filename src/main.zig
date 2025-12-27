@@ -3,6 +3,34 @@ const objc = @import("objc");
 const hotkey = @import("hotkey.zig");
 const accessibility = @import("accessibility.zig");
 
+/// Recursively count all UI elements in the tree
+fn countElements(element: accessibility.UIElement, allocator: std.mem.Allocator, depth: usize) usize {
+    if (depth > 20) return 1; // Prevent infinite recursion
+
+    const children = element.getChildren(allocator) catch return 1;
+    defer accessibility.UIElement.freeElements(allocator, children);
+
+    var count: usize = 1;
+    for (children) |child| {
+        count += countElements(child, allocator, depth + 1);
+    }
+    return count;
+}
+
+/// Get frontmost application PID using NSWorkspace
+fn getFrontmostAppPid() ?c.pid_t {
+    const NSWorkspace = objc.getClass("NSWorkspace") orelse return null;
+    const workspace = NSWorkspace.msgSend(objc.Object, "sharedWorkspace", .{});
+
+    // frontmostApplication returns NSRunningApplication*
+    const frontAppPtr = workspace.msgSend(?*anyopaque, "frontmostApplication", .{});
+    if (frontAppPtr == null) return null;
+
+    const frontApp = objc.Object{ .value = @ptrCast(@alignCast(frontAppPtr.?)) };
+    const pid = frontApp.msgSend(c_int, "processIdentifier", .{});
+    return @intCast(pid);
+}
+
 /// Called when the hotkey (Cmd+Shift+Space) is activated
 fn onHotkeyActivated() void {
     std.debug.print("\n=== ZigNav Activated ===\n", .{});
@@ -11,13 +39,15 @@ fn onHotkeyActivated() void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const system = accessibility.UIElement.systemWide();
-    defer system.deinit();
-
-    const focused_app = system.getFocusedApplication() catch |err| {
-        std.debug.print("Could not get focused app: {} (run from standalone terminal)\n", .{err});
+    // Get frontmost app PID via NSWorkspace (more reliable than AXFocusedApplication)
+    const pid = getFrontmostAppPid() orelse {
+        std.debug.print("Could not get frontmost app PID\n", .{});
         return;
     };
+    std.debug.print("Frontmost app PID: {}\n", .{pid});
+
+    // Create accessibility element for this app
+    const focused_app = accessibility.UIElement.forApplication(pid);
     defer focused_app.deinit();
 
     // Get app title
@@ -31,6 +61,24 @@ fn onHotkeyActivated() void {
     // Get main window
     const main_window = focused_app.getMainWindow() catch |err| {
         std.debug.print("Could not get main window: {}\n", .{err});
+
+        // Try getting all windows instead
+        std.debug.print("Trying to list all windows...\n", .{});
+        const windows = focused_app.getWindows(allocator) catch |werr| {
+            std.debug.print("Could not get windows list: {}\n", .{werr});
+            return;
+        };
+        defer accessibility.UIElement.freeElements(allocator, windows);
+
+        std.debug.print("App has {} windows\n", .{windows.len});
+        for (windows, 0..) |win, i| {
+            if (win.getTitle(allocator)) |title| {
+                defer allocator.free(title);
+                std.debug.print("  Window {}: {s}\n", .{ i, title });
+            } else {
+                std.debug.print("  Window {}: (no title)\n", .{i});
+            }
+        }
         return;
     };
     defer main_window.deinit();
@@ -53,7 +101,11 @@ fn onHotkeyActivated() void {
         frame.size.height,
     });
 
-    // Count children (UI elements)
+    // Count all UI elements recursively
+    const total_elements = countElements(main_window, allocator, 0);
+    std.debug.print("Total UI elements in tree: {}\n", .{total_elements});
+
+    // Get direct children
     const children = main_window.getChildren(allocator) catch {
         std.debug.print("Could not get children\n", .{});
         return;
