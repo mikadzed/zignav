@@ -17,6 +17,7 @@ const c = @cImport({
 pub const LabelInfo = struct {
     label: []const u8,
     x: f64, // Center X of element
+    top_y: f64, // Top Y of element (for popover positioning)
     bottom_y: f64, // Bottom Y of element (for popunder positioning)
 };
 
@@ -160,12 +161,23 @@ fn createLabelField(info: LabelInfo) !void {
     const width: f64 = 28; // Fixed width for all boxes
     const height: f64 = font_size + padding_v * 2 + 4;
 
-    // Position as popunder: label TOP at element BOTTOM, centered horizontally
+    // Position label horizontally centered
     const x = info.x - width / 2;
-    // In flipped coords: element bottom_y becomes (screen_height - bottom_y)
-    // We want label TOP at that point, so label origin is at (screen_height - bottom_y - height)
-    const flipped_bottom = screen_height - info.bottom_y;
-    const y = flipped_bottom - height - 2; // 2px gap below element
+
+    // Determine if element is near bottom of screen (e.g., Dock items)
+    // If element's bottom is in the lower 100px of screen, show label above
+    const near_bottom = info.bottom_y > (screen_height - 100);
+
+    const y = if (near_bottom) blk: {
+        // Popover: label BOTTOM at element TOP
+        // In flipped coords: element top_y becomes (screen_height - top_y)
+        const flipped_top = screen_height - info.top_y;
+        break :blk flipped_top + 2; // 2px gap above element
+    } else blk: {
+        // Popunder: label TOP at element BOTTOM
+        const flipped_bottom = screen_height - info.bottom_y;
+        break :blk flipped_bottom - height - 2; // 2px gap below element
+    };
 
     const frame = c.CGRect{
         .origin = .{ .x = x, .y = y },

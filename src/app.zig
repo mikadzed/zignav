@@ -30,6 +30,14 @@ pub const State = enum {
     executing,
 };
 
+/// Scan mode - determines what to scan
+pub const ScanMode = enum {
+    /// Scan the frontmost application's main window
+    frontmost_app,
+    /// Scan system-wide UI (Dock, menu bar, all visible elements)
+    system_ui,
+};
+
 /// Application context holding all state
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -66,21 +74,31 @@ pub const App = struct {
         return self.state;
     }
 
-    /// Handle hotkey activation
+    /// Handle hotkey activation (frontmost app)
     pub fn onHotkeyActivated(self: *Self) void {
         switch (self.state) {
             .idle => {
-                // Start scanning
                 self.transitionTo(.scanning);
-                self.scan();
+                self.scan(.frontmost_app);
             },
             .showing_labels => {
-                // Toggle off - hide overlay
                 self.transitionTo(.idle);
             },
-            .scanning, .executing => {
-                // Ignore hotkey while busy
+            .scanning, .executing => {},
+        }
+    }
+
+    /// Handle system UI hotkey activation
+    pub fn onSystemUIActivated(self: *Self) void {
+        switch (self.state) {
+            .idle => {
+                self.transitionTo(.scanning);
+                self.scan(.system_ui);
             },
+            .showing_labels => {
+                self.transitionTo(.idle);
+            },
+            .scanning, .executing => {},
         }
     }
 
@@ -137,43 +155,77 @@ pub const App = struct {
         }
     }
 
-    /// Scan frontmost app for clickable elements
-    fn scan(self: *Self) void {
-        std.debug.print("\n=== ZigNav Activated ===\n", .{});
-
-        // Get frontmost app PID
-        const pid = getFrontmostAppPid() orelse {
-            std.debug.print("Could not get frontmost app PID\n", .{});
-            self.transitionTo(.idle);
-            return;
-        };
-
-        // Create accessibility element for this app
-        const focused_app = accessibility.UIElement.forApplication(pid);
-        defer focused_app.deinit();
-
-        // Enable manual accessibility for Electron apps
-        focused_app.enableManualAccessibility();
-
-        // Get app title for logging
-        if (focused_app.getTitle(self.allocator)) |title| {
-            defer self.allocator.free(title);
-            std.debug.print("App: {s}\n", .{title});
+    /// Scan for clickable elements based on scan mode
+    fn scan(self: *Self, mode: ScanMode) void {
+        switch (mode) {
+            .frontmost_app => {
+                std.debug.print("\n=== ZigNav Activated (App Mode) ===\n", .{});
+            },
+            .system_ui => {
+                std.debug.print("\n=== ZigNav Activated (System UI Mode) ===\n", .{});
+            },
         }
 
-        // Get main window
-        const main_window = focused_app.getMainWindow() catch |err| {
-            std.debug.print("Could not get main window: {}\n", .{err});
-            self.transitionTo(.idle);
-            return;
-        };
-        defer main_window.deinit();
+        // Collect clickable elements based on mode
+        const clickable: []accessibility.ClickableElement = switch (mode) {
+            .frontmost_app => blk: {
+                const pid = getFrontmostAppPid() orelse {
+                    std.debug.print("Could not get frontmost app PID\n", .{});
+                    self.transitionTo(.idle);
+                    return;
+                };
 
-        // Collect clickable elements
-        const clickable = accessibility.collectClickableElements(main_window, self.allocator, 50) catch |err| {
-            std.debug.print("Could not collect clickable elements: {}\n", .{err});
-            self.transitionTo(.idle);
-            return;
+                const focused_app = accessibility.UIElement.forApplication(pid);
+
+                // Enable manual accessibility for Electron apps
+                focused_app.enableManualAccessibility();
+
+                // Get app title for logging
+                if (focused_app.getTitle(self.allocator)) |title| {
+                    defer self.allocator.free(title);
+                    std.debug.print("App: {s}\n", .{title});
+                }
+
+                // Get main window
+                const main_window = focused_app.getMainWindow() catch |err| {
+                    std.debug.print("Could not get main window: {}\n", .{err});
+                    focused_app.deinit();
+                    self.transitionTo(.idle);
+                    return;
+                };
+
+                // Clean up the app element, we only need the window
+                focused_app.deinit();
+                defer main_window.deinit();
+
+                break :blk accessibility.collectClickableElements(main_window, self.allocator, 50) catch |err| {
+                    std.debug.print("Could not collect clickable elements: {}\n", .{err});
+                    self.transitionTo(.idle);
+                    return;
+                };
+            },
+            .system_ui => blk: {
+                std.debug.print("Scanning menu bar and Dock...\n", .{});
+
+                // Get frontmost app PID for menu bar
+                const frontmost_pid = getFrontmostAppPid() orelse {
+                    std.debug.print("Could not get frontmost app PID\n", .{});
+                    self.transitionTo(.idle);
+                    return;
+                };
+
+                // Get Dock PID
+                const dock_pid = getDockPid();
+                if (dock_pid == null) {
+                    std.debug.print("Could not find Dock process\n", .{});
+                }
+
+                break :blk accessibility.collectMenuBarAndDockElements(self.allocator, frontmost_pid, dock_pid) catch |err| {
+                    std.debug.print("Could not collect menu bar/Dock elements: {}\n", .{err});
+                    self.transitionTo(.idle);
+                    return;
+                };
+            },
         };
 
         if (clickable.len == 0) {
@@ -211,6 +263,7 @@ pub const App = struct {
             label_infos[i] = .{
                 .label = element_labels[i],
                 .x = elem.frame.origin.x + elem.frame.size.width / 2,
+                .top_y = elem.frame.origin.y,
                 .bottom_y = elem.frame.origin.y + elem.frame.size.height,
             };
 
@@ -286,6 +339,48 @@ fn getFrontmostAppPid() ?c.pid_t {
     return @intCast(pid);
 }
 
+/// Get PID of the Dock application using NSWorkspace
+/// Returns null if Dock is not found
+fn getDockPid() ?c.pid_t {
+    const NSWorkspace = objc.getClass("NSWorkspace") orelse return null;
+    const NSString = objc.getClass("NSString") orelse return null;
+    const workspace = NSWorkspace.msgSend(objc.Object, "sharedWorkspace", .{});
+
+    // Get array of running applications
+    const runningApps = workspace.msgSend(objc.Object, "runningApplications", .{});
+    const count = runningApps.msgSend(c_ulong, "count", .{});
+
+    if (count == 0) return null;
+
+    // Create NSString for "com.apple.dock"
+    const dock_bundle_id = NSString.msgSend(objc.Object, "stringWithUTF8String:", .{@as([*:0]const u8, "com.apple.dock")});
+
+    var i: c_ulong = 0;
+    while (i < count) : (i += 1) {
+        const appPtr = runningApps.msgSend(?*anyopaque, "objectAtIndex:", .{i});
+        if (appPtr) |ptr| {
+            const app_obj = objc.Object{ .value = @ptrCast(@alignCast(ptr)) };
+
+            // Get bundle identifier
+            const bundle_id_ptr = app_obj.msgSend(?*anyopaque, "bundleIdentifier", .{});
+            if (bundle_id_ptr) |bid_ptr| {
+                const bundle_id = objc.Object{ .value = @ptrCast(@alignCast(bid_ptr)) };
+
+                // Compare with "com.apple.dock"
+                const is_equal = bundle_id.msgSend(c_int, "isEqualToString:", .{dock_bundle_id.value});
+                if (is_equal != 0) {
+                    const pid = app_obj.msgSend(c_int, "processIdentifier", .{});
+                    if (pid > 0) {
+                        return @intCast(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
 // Global app instance (needed for callbacks)
 var global_app: ?*App = null;
 
@@ -305,5 +400,12 @@ pub fn hotkeyCallback() void {
 pub fn dismissCallback() void {
     if (global_app) |app| {
         app.onDismiss();
+    }
+}
+
+/// Callback for system UI hotkey activation
+pub fn systemUICallback() void {
+    if (global_app) |app| {
+        app.onSystemUIActivated();
     }
 }

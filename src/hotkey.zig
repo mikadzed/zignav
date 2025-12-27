@@ -50,9 +50,15 @@ pub const Keycode = struct {
     pub const tab: u16 = 48;
 };
 
-// Default hotkey: Cmd+Shift+Space
+// Default hotkey: Cmd+Shift+Space (frontmost app)
 pub const default_hotkey = Hotkey{
     .keycode = Keycode.space,
+    .modifiers = .{ .command = true, .shift = true },
+};
+
+// System UI hotkey: Cmd+Shift+Enter (system-wide scan)
+pub const system_ui_hotkey = Hotkey{
+    .keycode = Keycode.@"return",
     .modifiers = .{ .command = true, .shift = true },
 };
 
@@ -62,6 +68,7 @@ var run_loop_source: ?c.CFRunLoopSourceRef = null;
 var is_running: bool = false;
 var registered_hotkey: Hotkey = default_hotkey;
 var hotkey_callback: ?*const fn () void = null;
+var system_ui_callback: ?*const fn () void = null;
 var dismiss_callback: ?*const fn () void = null;
 
 // C-compatible callback
@@ -86,13 +93,21 @@ fn eventTapCallback(
         const flags = c.CGEventGetFlags(event);
         const modifiers = Modifiers.fromCGEventFlags(flags);
 
-        // Check if hotkey matches (always check this first)
+        // Check if main hotkey matches (Cmd+Shift+Space)
         if (keycode == registered_hotkey.keycode and modifiers.matches(registered_hotkey.modifiers)) {
             std.debug.print("Hotkey activated!\n", .{});
             if (hotkey_callback) |cb| {
                 cb();
             }
-            // Consume the hotkey event
+            return null;
+        }
+
+        // Check if system UI hotkey matches (Cmd+Shift+Enter)
+        if (keycode == system_ui_hotkey.keycode and modifiers.matches(system_ui_hotkey.modifiers)) {
+            std.debug.print("System UI hotkey activated!\n", .{});
+            if (system_ui_callback) |cb| {
+                cb();
+            }
             return null;
         }
 
@@ -143,6 +158,11 @@ pub fn setHotkey(hotkey: Hotkey) void {
 /// Set callback function to be called when hotkey is activated
 pub fn setCallback(callback: ?*const fn () void) void {
     hotkey_callback = callback;
+}
+
+/// Set callback function to be called when system UI hotkey is activated
+pub fn setSystemUICallback(callback: ?*const fn () void) void {
+    system_ui_callback = callback;
 }
 
 /// Set callback function to be called when overlay should be dismissed

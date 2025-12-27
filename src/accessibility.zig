@@ -83,6 +83,8 @@ pub const Attribute = struct {
     pub const focusedWindow: [*:0]const u8 = "AXFocusedWindow";
     pub const mainWindow: [*:0]const u8 = "AXMainWindow";
     pub const frontmost: [*:0]const u8 = "AXFrontmost";
+    pub const menuBar: [*:0]const u8 = "AXMenuBar";
+    pub const extrasMenuBar: [*:0]const u8 = "AXExtrasMenuBar";
 };
 
 pub const Role = struct {
@@ -96,6 +98,10 @@ pub const Role = struct {
     pub const radioButton: [*:0]const u8 = "AXRadioButton";
     pub const popUpButton: [*:0]const u8 = "AXPopUpButton";
     pub const menuButton: [*:0]const u8 = "AXMenuButton";
+    pub const menuBar: [*:0]const u8 = "AXMenuBar";
+    pub const menuBarItem: [*:0]const u8 = "AXMenuBarItem";
+    pub const menu: [*:0]const u8 = "AXMenu";
+    pub const menuItem: [*:0]const u8 = "AXMenuItem";
     pub const group: [*:0]const u8 = "AXGroup";
     pub const scrollArea: [*:0]const u8 = "AXScrollArea";
     pub const table: [*:0]const u8 = "AXTable";
@@ -105,6 +111,7 @@ pub const Role = struct {
     pub const image: [*:0]const u8 = "AXImage";
     pub const toolbar: [*:0]const u8 = "AXToolbar";
     pub const tabGroup: [*:0]const u8 = "AXTabGroup";
+    pub const dockItem: [*:0]const u8 = "AXDockItem";
 };
 
 pub const Action = struct {
@@ -161,6 +168,14 @@ pub const UIElement = struct {
         if (self.ref != null) {
             c.CFRelease(@ptrCast(self.ref));
         }
+    }
+
+    /// Retain the element (increase reference count) and return a new UIElement
+    pub fn retain(self: UIElement) UIElement {
+        if (self.ref != null) {
+            _ = c.CFRetain(@ptrCast(self.ref));
+        }
+        return .{ .ref = self.ref };
     }
 
     /// Get raw attribute value (caller must CFRelease)
@@ -245,6 +260,18 @@ pub const UIElement = struct {
             }
             return err;
         };
+        return UIElement{ .ref = @ptrCast(@alignCast(value)) };
+    }
+
+    /// Get the menu bar of an application
+    pub fn getMenuBar(self: UIElement) AccessibilityError!UIElement {
+        const value = try self.copyAttributeValue(Attribute.menuBar);
+        return UIElement{ .ref = @ptrCast(@alignCast(value)) };
+    }
+
+    /// Get the extras menu bar (system tray area) of an application
+    pub fn getExtrasMenuBar(self: UIElement) AccessibilityError!UIElement {
+        const value = try self.copyAttributeValue(Attribute.extrasMenuBar);
         return UIElement{ .ref = @ptrCast(@alignCast(value)) };
     }
 
@@ -348,6 +375,31 @@ pub const UIElement = struct {
 
         const err = c.AXUIElementPerformAction(self.ref, action_str);
         try axErrorToZig(err);
+    }
+
+    /// Check if an action can be performed on this element
+    pub fn canPerformAction(self: UIElement, action: [*:0]const u8) bool {
+        // Get the list of available actions
+        var actions: c.CFArrayRef = null;
+        const err = c.AXUIElementCopyActionNames(self.ref, &actions);
+        if (err != c.kAXErrorSuccess or actions == null) return false;
+        defer c.CFRelease(@ptrCast(actions));
+
+        // Create CFString for the action we're looking for
+        const action_str = cfstr(action);
+        defer if (action_str != null) c.CFRelease(@ptrCast(action_str));
+        if (action_str == null) return false;
+
+        // Check if the action is in the list
+        const count = c.CFArrayGetCount(actions);
+        var i: c.CFIndex = 0;
+        while (i < count) : (i += 1) {
+            const item = c.CFArrayGetValueAtIndex(actions, i);
+            if (c.CFEqual(item, @ptrCast(action_str)) != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Set an attribute value on the element
@@ -575,4 +627,120 @@ pub fn requestAccessibilityPermission() void {
     defer if (options != null) c.CFRelease(@ptrCast(options));
 
     _ = c.AXIsProcessTrustedWithOptions(options);
+}
+
+// ============================================================================
+// Menu Bar and Dock Element Collection
+// ============================================================================
+
+/// Collect clickable elements from the menu bar and Dock only
+/// frontmost_pid: PID of the frontmost application (for menu bar)
+/// dock_pid: PID of the Dock application
+pub fn collectMenuBarAndDockElements(
+    allocator: std.mem.Allocator,
+    frontmost_pid: c.pid_t,
+    dock_pid: ?c.pid_t,
+) ![]ClickableElement {
+    var all_elements = std.ArrayListUnmanaged(ClickableElement){};
+    errdefer {
+        for (all_elements.items) |elem| {
+            elem.element.deinit();
+        }
+        all_elements.deinit(allocator);
+    }
+
+    // 1. Collect menu bar items from frontmost application
+    {
+        const app_element = UIElement.forApplication(frontmost_pid);
+        defer app_element.deinit();
+
+        // Try to get the menu bar
+        if (app_element.getMenuBar()) |menu_bar| {
+            defer menu_bar.deinit();
+            std.debug.print("Collecting menu bar items...\n", .{});
+
+            // Get menu bar children (menu bar items like File, Edit, etc.)
+            if (menu_bar.getChildren(allocator)) |menu_items| {
+                defer UIElement.freeElements(allocator, menu_items);
+
+                for (menu_items) |item| {
+                    // Check if the item has a valid frame
+                    const frame = item.getFrame() catch continue;
+
+                    // Skip items with zero size or off-screen
+                    if (frame.size.width <= 0 or frame.size.height <= 0) continue;
+                    if (frame.origin.x < 0 or frame.origin.y < 0) continue;
+
+                    // Check if it has AXPress action
+                    if (!item.canPerformAction(Action.press)) continue;
+
+                    // Retain and add to list
+                    const retained = item.retain();
+                    try all_elements.append(allocator, .{
+                        .element = retained,
+                        .frame = frame,
+                    });
+                }
+                std.debug.print("  Menu bar: {} items\n", .{all_elements.items.len});
+            } else |_| {}
+        } else |_| {
+            std.debug.print("Could not access menu bar\n", .{});
+        }
+    }
+
+    // 2. Collect Dock items
+    if (dock_pid) |pid| {
+        const dock_app = UIElement.forApplication(pid);
+        defer dock_app.deinit();
+
+        std.debug.print("Collecting Dock items...\n", .{});
+        const dock_start = all_elements.items.len;
+
+        // The Dock's main "list" contains the dock items
+        // We need to traverse the Dock's children to find the list
+        if (dock_app.getChildren(allocator)) |dock_children| {
+            defer UIElement.freeElements(allocator, dock_children);
+
+            for (dock_children) |child| {
+                // Recursively collect from dock children (lists contain dock items)
+                try collectDockItems(allocator, child, &all_elements);
+            }
+        } else |_| {}
+
+        std.debug.print("  Dock: {} items\n", .{all_elements.items.len - dock_start});
+    }
+
+    std.debug.print("Total menu bar + Dock elements: {}\n", .{all_elements.items.len});
+    return all_elements.toOwnedSlice(allocator);
+}
+
+/// Recursively collect dock items from a Dock UI element
+fn collectDockItems(
+    allocator: std.mem.Allocator,
+    element: UIElement,
+    elements: *std.ArrayListUnmanaged(ClickableElement),
+) !void {
+    // Check if this element is clickable
+    const frame = element.getFrame() catch return;
+
+    // Skip elements with zero size
+    if (frame.size.width <= 0 or frame.size.height <= 0) return;
+
+    // Check if it's a pressable element
+    if (element.canPerformAction(Action.press)) {
+        const retained = element.retain();
+        try elements.append(allocator, .{
+            .element = retained,
+            .frame = frame,
+        });
+        return; // Don't recurse into clickable items
+    }
+
+    // Recurse into children
+    const children = element.getChildren(allocator) catch return;
+    defer UIElement.freeElements(allocator, children);
+
+    for (children) |child| {
+        try collectDockItems(allocator, child, elements);
+    }
 }

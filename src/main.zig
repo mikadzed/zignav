@@ -80,12 +80,16 @@ pub fn main() !void {
 
     // Register callbacks with hotkey module
     hotkey.setCallback(app.hotkeyCallback);
+    hotkey.setSystemUICallback(app.systemUICallback);
     hotkey.setDismissCallback(app.dismissCallback);
 
     // Set dismiss callback for input handler (timer-triggered actions)
     input.setDismissCallback(app.dismissCallback);
 
-    std.debug.print("Listening for Cmd+Shift+Space (Ctrl+C to exit)...\n", .{});
+    std.debug.print("Hotkeys:\n", .{});
+    std.debug.print("  Cmd+Shift+Space  - Scan frontmost app\n", .{});
+    std.debug.print("  Cmd+Shift+Enter  - Scan system UI (Dock, menu bar)\n", .{});
+    std.debug.print("  Ctrl+C           - Exit\n", .{});
 
     // Setup signal handlers for clean shutdown
     setupSignalHandlers();
