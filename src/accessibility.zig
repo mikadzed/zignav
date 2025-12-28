@@ -511,6 +511,34 @@ fn supportsPressAction(element: UIElement) bool {
     return false;
 }
 
+/// Get the main screen bounds
+fn getScreenBounds() Rect {
+    const display = c.CGMainDisplayID();
+    const bounds = c.CGDisplayBounds(display);
+    return .{
+        .origin = .{ .x = bounds.origin.x, .y = bounds.origin.y },
+        .size = .{ .width = bounds.size.width, .height = bounds.size.height },
+    };
+}
+
+/// Check if an element frame is visible on screen (with some margin for partially visible)
+fn isVisibleOnScreen(frame: Rect, screen: Rect) bool {
+    // Element must be at least partially within screen bounds
+    // Allow some margin for elements that are slightly off-screen
+    const margin: f64 = 50;
+
+    const elem_right = frame.origin.x + frame.size.width;
+    const elem_bottom = frame.origin.y + frame.size.height;
+    const screen_right = screen.origin.x + screen.size.width + margin;
+    const screen_bottom = screen.origin.y + screen.size.height + margin;
+
+    // Check if element is within screen bounds (with margin)
+    return frame.origin.x < screen_right and
+        elem_right > screen.origin.x - margin and
+        frame.origin.y < screen_bottom and
+        elem_bottom > screen.origin.y - margin;
+}
+
 /// Recursively collect clickable elements from the UI tree
 pub fn collectClickableElements(
     root: UIElement,
@@ -525,7 +553,8 @@ pub fn collectClickableElements(
         elements.deinit(allocator);
     }
 
-    try collectClickableElementsRecursive(root, allocator, &elements, 0, max_depth);
+    const screen_bounds = getScreenBounds();
+    try collectClickableElementsRecursive(root, allocator, &elements, 0, max_depth, screen_bounds);
 
     // Deduplicate elements that are at the same position (nested clickables)
     var deduped = std.ArrayListUnmanaged(ClickableElement){};
@@ -572,6 +601,7 @@ fn collectClickableElementsRecursive(
     result: *std.ArrayListUnmanaged(ClickableElement),
     depth: usize,
     max_depth: usize,
+    screen_bounds: Rect,
 ) !void {
     if (depth > max_depth) return;
 
@@ -586,7 +616,8 @@ fn collectClickableElementsRecursive(
         const frame = element.getFrame() catch null;
         if (frame) |f| {
             // Skip elements that are too small to be useful (< 5x5 pixels)
-            if (f.size.width >= 5 and f.size.height >= 5) {
+            // Also skip elements that are not visible on screen
+            if (f.size.width >= 5 and f.size.height >= 5 and isVisibleOnScreen(f, screen_bounds)) {
                 // Retain the element reference since we're storing it
                 if (element.ref != null) {
                     _ = c.CFRetain(@ptrCast(element.ref));
@@ -604,7 +635,7 @@ fn collectClickableElementsRecursive(
     defer UIElement.freeElements(allocator, children);
 
     for (children) |child| {
-        try collectClickableElementsRecursive(child, allocator, result, depth + 1, max_depth);
+        try collectClickableElementsRecursive(child, allocator, result, depth + 1, max_depth, screen_bounds);
     }
 }
 

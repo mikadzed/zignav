@@ -42,6 +42,32 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_cmd.step);
 
+    // Bundle step - creates macOS .app bundle
+    const bundle_step = b.step("bundle", "Create macOS app bundle");
+
+    // Install executable into Contents/MacOS/
+    const install_exe = b.addInstallFile(
+        exe.getEmittedBin(),
+        "ZigNav.app/Contents/MacOS/zignav",
+    );
+    install_exe.step.dependOn(&exe.step);
+
+    // Install Info.plist into Contents/
+    const install_plist = b.addInstallFile(
+        b.path("resources/Info.plist"),
+        "ZigNav.app/Contents/Info.plist",
+    );
+
+    // Install icon into Contents/Resources/
+    const install_icon = b.addInstallFile(
+        b.path("resources/ZigNav.icns"),
+        "ZigNav.app/Contents/Resources/ZigNav.icns",
+    );
+
+    bundle_step.dependOn(&install_exe.step);
+    bundle_step.dependOn(&install_plist.step);
+    bundle_step.dependOn(&install_icon.step);
+
     // Test step
     const labels_tests = b.addTest(.{
         .root_module = b.createModule(.{
