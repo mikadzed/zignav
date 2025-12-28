@@ -187,12 +187,29 @@ pub const App = struct {
             return;
         };
 
-        // Collect visible menu items
-        const menu_elements = accessibility.collectVisibleMenuItems(self.allocator, frontmost_pid) catch |err| {
+        // Collect visible menu items from frontmost app
+        var menu_elements = accessibility.collectVisibleMenuItems(self.allocator, frontmost_pid) catch |err| {
             std.debug.print("Could not collect menu items: {}\n", .{err});
             self.transitionTo(.idle);
             return;
         };
+
+        // If no menu items found in frontmost app and we're in system UI mode,
+        // also try scanning the Dock for context menus
+        if (menu_elements.len == 0 and self.is_menu_mode) {
+            accessibility.freeClickableElements(self.allocator, menu_elements);
+
+            if (getDockPid()) |dock_pid| {
+                std.debug.print("Checking Dock for context menus...\n", .{});
+                menu_elements = accessibility.collectVisibleMenuItems(self.allocator, dock_pid) catch |err| {
+                    std.debug.print("Could not collect Dock menu items: {}\n", .{err});
+                    self.is_menu_mode = false;
+                    input.setMenuMode(false);
+                    self.transitionTo(.idle);
+                    return;
+                };
+            }
+        }
 
         if (menu_elements.len == 0) {
             std.debug.print("No menu items found - action complete, dismissing\n", .{});

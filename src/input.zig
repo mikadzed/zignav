@@ -69,25 +69,32 @@ fn debounceTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) vo
         executeAction(idx, action);
         pending_action_index = null;
 
-        // In menu mode, only continue if the item has a submenu
+        // In menu mode, continue scanning for submenus
         if (is_menu_mode) {
-            const elements = current_elements orelse {
-                if (dismiss_callback_ptr) |cb| cb();
-                cancelDebounceTimer();
-                return;
-            };
-            const alloc = allocator orelse {
-                if (dismiss_callback_ptr) |cb| cb();
-                cancelDebounceTimer();
-                return;
-            };
-
-            if (idx < elements.len and elements[idx].element.hasSubmenu(alloc)) {
-                std.debug.print("Menu item has submenu - continuing\n", .{});
+            // show_menu always opens a context menu, so always re-scan
+            if (pending_action_shift) {
+                std.debug.print("show_menu action in menu mode - continuing to scan submenu\n", .{});
                 if (menu_continue_callback_ptr) |cb| cb();
             } else {
-                std.debug.print("Menu item has no submenu - dismissing\n", .{});
-                if (dismiss_callback_ptr) |cb| cb();
+                // For press action, only continue if the item has a submenu
+                const elements = current_elements orelse {
+                    if (dismiss_callback_ptr) |cb| cb();
+                    cancelDebounceTimer();
+                    return;
+                };
+                const alloc = allocator orelse {
+                    if (dismiss_callback_ptr) |cb| cb();
+                    cancelDebounceTimer();
+                    return;
+                };
+
+                if (idx < elements.len and elements[idx].element.hasSubmenu(alloc)) {
+                    std.debug.print("Menu item has submenu - continuing\n", .{});
+                    if (menu_continue_callback_ptr) |cb| cb();
+                } else {
+                    std.debug.print("Menu item has no submenu - dismissing\n", .{});
+                    if (dismiss_callback_ptr) |cb| cb();
+                }
             }
         } else {
             if (dismiss_callback_ptr) |cb| cb();
@@ -275,8 +282,14 @@ pub fn processLetter(char: u8, shift_held: bool) InputResult {
             std.debug.print("Exact unique match at index {} - executing {s}\n", .{ idx, if (shift_held) "show_menu" else "press" });
             executeAction(idx, action);
 
-            // In menu mode, only continue if the item has a submenu
+            // In menu mode, continue scanning for submenus
             if (is_menu_mode) {
+                // show_menu always opens a context menu, so always re-scan
+                if (shift_held) {
+                    std.debug.print("show_menu action in menu mode - continuing to scan submenu\n", .{});
+                    return .menu_continue;
+                }
+                // For press action, only continue if the item has a submenu
                 const elements = current_elements orelse return .execute;
                 const alloc = allocator orelse return .execute;
                 if (idx < elements.len and elements[idx].element.hasSubmenu(alloc)) {

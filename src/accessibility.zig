@@ -236,6 +236,37 @@ pub const UIElement = struct {
         return @ptrCast(value);
     }
 
+    /// Get role as a Zig string (caller owns the memory)
+    pub fn getRoleString(self: UIElement, allocator: std.mem.Allocator) ?[]u8 {
+        const element_role = self.getRole() catch return null;
+        defer if (element_role != null) c.CFRelease(@ptrCast(element_role));
+
+        if (element_role == null) return null;
+
+        const length = c.CFStringGetLength(element_role);
+        const max_size: usize = @intCast(c.CFStringGetMaximumSizeForEncoding(length, c.kCFStringEncodingUTF8) + 1);
+
+        const buffer = allocator.alloc(u8, max_size) catch return null;
+
+        if (c.CFStringGetCString(element_role, buffer.ptr, @intCast(max_size), c.kCFStringEncodingUTF8) == 0) {
+            allocator.free(buffer);
+            return null;
+        }
+
+        // Find actual length and reallocate to exact size
+        const actual_len = std.mem.indexOfScalar(u8, buffer, 0) orelse max_size;
+
+        // Allocate exact size and copy
+        const result = allocator.alloc(u8, actual_len) catch {
+            allocator.free(buffer);
+            return null;
+        };
+        @memcpy(result, buffer[0..actual_len]);
+        allocator.free(buffer);
+
+        return result;
+    }
+
     /// Check if element has a specific role
     pub fn hasRole(self: UIElement, role: [*:0]const u8) bool {
         const element_role = self.getRole() catch return false;
@@ -799,6 +830,7 @@ fn collectDockItems(
 
 /// Collect visible menu items from the frontmost application
 /// This is used after a menu bar item has been pressed to find the dropdown menu items
+/// Also scans for context menus (standalone AXMenu elements like Dock right-click menus)
 pub fn collectVisibleMenuItems(
     allocator: std.mem.Allocator,
     frontmost_pid: c.pid_t,
@@ -829,8 +861,91 @@ pub fn collectVisibleMenuItems(
         } else |_| {}
     } else |_| {}
 
+    // If no menu bar items found, check for context menus (standalone AXMenu elements)
+    // These appear as direct children of the application or in windows (e.g., Dock context menus)
+    if (menu_items.items.len == 0) {
+        std.debug.print("No menu bar items, checking for context menus...\n", .{});
+
+        // Check app's direct children - recursively search for AXMenu
+        if (app_element.getChildren(allocator)) |children| {
+            defer UIElement.freeElements(allocator, children);
+
+            std.debug.print("App has {} direct children\n", .{children.len});
+            for (children) |child| {
+                if (child.getRoleString(allocator)) |r| {
+                    defer allocator.free(r);
+                    std.debug.print("  Child role: {s}\n", .{r});
+                }
+                if (child.hasRole(Role.menu)) {
+                    std.debug.print("Found context menu as app child\n", .{});
+                    try collectMenuItemsFromElement(allocator, child, &menu_items);
+                } else {
+                    // For Dock: search inside AXList for context menus
+                    try searchForContextMenus(allocator, child, &menu_items, 0);
+                }
+            }
+        } else |_| {
+            std.debug.print("Could not get app children\n", .{});
+        }
+
+        // Also check windows for AXMenu children (some apps put context menus in windows)
+        if (menu_items.items.len == 0) {
+            if (app_element.getWindows(allocator)) |windows| {
+                defer UIElement.freeElements(allocator, windows);
+
+                std.debug.print("App has {} windows\n", .{windows.len});
+                for (windows) |window| {
+                    if (window.getRoleString(allocator)) |wr| {
+                        defer allocator.free(wr);
+                        std.debug.print("  Window role: {s}\n", .{wr});
+                    }
+
+                    // Check if the window itself is a menu
+                    if (window.hasRole(Role.menu)) {
+                        std.debug.print("Window IS a menu\n", .{});
+                        try collectMenuItemsFromElement(allocator, window, &menu_items);
+                        continue;
+                    }
+
+                    // Search recursively in window for menus
+                    try searchForContextMenus(allocator, window, &menu_items, 0);
+                }
+            } else |_| {
+                std.debug.print("Could not get windows\n", .{});
+            }
+        }
+    }
+
     std.debug.print("Found {} visible menu items\n", .{menu_items.items.len});
     return menu_items.toOwnedSlice(allocator);
+}
+
+/// Recursively search for context menus (AXMenu) in element hierarchy
+/// Used to find Dock context menus which are nested inside AXList
+fn searchForContextMenus(
+    allocator: std.mem.Allocator,
+    element: UIElement,
+    items: *std.ArrayListUnmanaged(ClickableElement),
+    depth: usize,
+) !void {
+    // Limit depth to avoid infinite recursion
+    if (depth > 5) return;
+
+    const children = element.getChildren(allocator) catch return;
+    defer UIElement.freeElements(allocator, children);
+
+    for (children) |child| {
+        if (child.hasRole(Role.menu)) {
+            if (child.getRoleString(allocator)) |r| {
+                defer allocator.free(r);
+                std.debug.print("  Found AXMenu at depth {}\n", .{depth});
+            }
+            try collectMenuItemsFromElement(allocator, child, items);
+        } else {
+            // Continue searching deeper
+            try searchForContextMenus(allocator, child, items, depth + 1);
+        }
+    }
 }
 
 /// Recursively collect menu items from an element (looking for AXMenu and AXMenuItem)
