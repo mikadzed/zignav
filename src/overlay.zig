@@ -126,8 +126,9 @@ fn createOverlayWindow() !void {
     // Make it non-activating and ignore mouse events
     window.msgSend(void, "setIgnoresMouseEvents:", .{@as(c_int, 1)});
 
-    // Don't show in Expose/Mission Control
-    window.msgSend(void, "setCollectionBehavior:", .{@as(c_ulong, 1 << 4)}); // NSWindowCollectionBehaviorTransient
+    // Appear on all Spaces and don't show in Expose/Mission Control
+    // NSWindowCollectionBehaviorCanJoinAllSpaces (1) | NSWindowCollectionBehaviorTransient (16) = 17
+    window.msgSend(void, "setCollectionBehavior:", .{@as(c_ulong, 1 | 16)});
 
     // Create content view
     const view = NSView.msgSend(objc.Object, "alloc", .{});
