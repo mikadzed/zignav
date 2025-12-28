@@ -156,11 +156,11 @@ fn createLabelField(info: LabelInfo) !void {
     // macOS coordinate system has origin at bottom-left, need to flip Y
     const screen_height = getScreenHeight();
 
-    // Label dimensions - fixed size for consistency (fits 2 chars)
-    const font_size: f64 = 13;
-    const padding_v: f64 = 2;
-    const width: f64 = 28; // Fixed width for all boxes
-    const height: f64 = font_size + padding_v * 2 + 4;
+    // Label dimensions - compact size for better visibility
+    const font_size: f64 = 11;
+    const padding_v: f64 = 1;
+    const width: f64 = 24; // Fixed width for all boxes
+    const height: f64 = font_size + padding_v * 2 + 2;
 
     // Position label horizontally centered
     const x = info.x - width / 2;
@@ -173,11 +173,11 @@ fn createLabelField(info: LabelInfo) !void {
         // Popover: label BOTTOM at element TOP
         // In flipped coords: element top_y becomes (screen_height - top_y)
         const flipped_top = screen_height - info.top_y;
-        break :blk flipped_top + 2; // 2px gap above element
+        break :blk flipped_top; // Directly adjacent to element
     } else blk: {
         // Popunder: label TOP at element BOTTOM
         const flipped_bottom = screen_height - info.bottom_y;
-        break :blk flipped_bottom - height - 2; // 2px gap below element
+        break :blk flipped_bottom - height; // Directly adjacent to element
     };
 
     const frame = c.CGRect{

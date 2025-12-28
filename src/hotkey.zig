@@ -88,6 +88,21 @@ fn eventTapCallback(
         return event;
     }
 
+    // Dismiss overlay on any mouse click or scroll
+    if (event_type == c.kCGEventLeftMouseDown or
+        event_type == c.kCGEventRightMouseDown or
+        event_type == c.kCGEventOtherMouseDown or
+        event_type == c.kCGEventScrollWheel)
+    {
+        if (overlay.isVisible()) {
+            std.debug.print("Mouse action detected - dismissing overlay\n", .{});
+            if (dismiss_callback) |cb| {
+                cb();
+            }
+        }
+        return event; // Always pass mouse events through
+    }
+
     // Only process key down events
     if (event_type == c.kCGEventKeyDown) {
         const keycode: u16 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
@@ -188,7 +203,11 @@ pub fn init() HotkeyError!void {
 
     const event_mask: c.CGEventMask =
         (@as(c.CGEventMask, 1) << @intCast(c.kCGEventKeyDown)) |
-        (@as(c.CGEventMask, 1) << @intCast(c.kCGEventKeyUp));
+        (@as(c.CGEventMask, 1) << @intCast(c.kCGEventKeyUp)) |
+        (@as(c.CGEventMask, 1) << @intCast(c.kCGEventLeftMouseDown)) |
+        (@as(c.CGEventMask, 1) << @intCast(c.kCGEventRightMouseDown)) |
+        (@as(c.CGEventMask, 1) << @intCast(c.kCGEventOtherMouseDown)) |
+        (@as(c.CGEventMask, 1) << @intCast(c.kCGEventScrollWheel));
 
     // Use kCGEventTapOptionDefault to be able to intercept (consume) events
     event_tap = c.CGEventTapCreate(
