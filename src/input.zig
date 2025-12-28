@@ -54,6 +54,7 @@ var allocator: ?std.mem.Allocator = null;
 /// Debounce timer state
 var debounce_timer: ?c.CFRunLoopTimerRef = null;
 var pending_action_index: ?usize = null;
+var pending_action_shift: bool = false; // Whether shift was held when action was queued
 var dismiss_callback_ptr: ?*const fn () void = null;
 var menu_continue_callback_ptr: ?*const fn () void = null;
 
@@ -63,8 +64,9 @@ var is_menu_mode: bool = false;
 /// Timer callback - fires after debounce delay to execute single-letter action
 fn debounceTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) void {
     if (pending_action_index) |idx| {
-        std.debug.print("Debounce timer fired - executing action on index {}\n", .{idx});
-        executeAction(idx, .press);
+        const action: ClickAction = if (pending_action_shift) .show_menu else .press;
+        std.debug.print("Debounce timer fired - executing {s} on index {}\n", .{ if (pending_action_shift) "show_menu" else "press", idx });
+        executeAction(idx, action);
         pending_action_index = null;
 
         // In menu mode, only continue if the item has a submenu
@@ -95,9 +97,10 @@ fn debounceTimerCallback(_: c.CFRunLoopTimerRef, _: ?*anyopaque) callconv(.c) vo
 }
 
 /// Start debounce timer for potential single-letter match
-fn startDebounceTimer(action_index: usize) void {
+fn startDebounceTimer(action_index: usize, shift_held: bool) void {
     cancelDebounceTimer();
     pending_action_index = action_index;
+    pending_action_shift = shift_held;
 
     var context = c.CFRunLoopTimerContext{
         .version = 0,
@@ -131,6 +134,7 @@ fn cancelDebounceTimer() void {
         debounce_timer = null;
     }
     pending_action_index = null;
+    pending_action_shift = false;
 }
 
 /// Initialize the input handler with element and label data
@@ -235,8 +239,8 @@ pub fn findUniquePrefixMatch() ?usize {
     return if (match_count == 1) match_index else null;
 }
 
-/// Process a letter key press
-pub fn processLetter(char: u8) InputResult {
+/// Process a letter key press (shift_held triggers right-click/show_menu instead of press)
+pub fn processLetter(char: u8, shift_held: bool) InputResult {
     // Only accept lowercase letters
     const lower = if (char >= 'A' and char <= 'Z') char + 32 else char;
     if (lower < 'a' or lower > 'z') return .passthrough;
@@ -251,7 +255,7 @@ pub fn processLetter(char: u8) InputResult {
 
         const input = typed_input[0..typed_len];
         const matches = countMatches();
-        std.debug.print("Typed: '{s}', matches: {}\n", .{ input, matches });
+        std.debug.print("Typed: '{s}', matches: {}, shift: {}\n", .{ input, matches, shift_held });
 
         if (matches == 0) {
             // No matches - undo and ignore
@@ -267,8 +271,9 @@ pub fn processLetter(char: u8) InputResult {
             // Only one match and it's exact - execute immediately
             const idx = exact_match_idx.?;
             selected_index = idx;
-            std.debug.print("Exact unique match at index {} - executing\n", .{idx});
-            executeAction(idx, .press);
+            const action: ClickAction = if (shift_held) .show_menu else .press;
+            std.debug.print("Exact unique match at index {} - executing {s}\n", .{ idx, if (shift_held) "show_menu" else "press" });
+            executeAction(idx, action);
 
             // In menu mode, only continue if the item has a submenu
             if (is_menu_mode) {
@@ -290,7 +295,7 @@ pub fn processLetter(char: u8) InputResult {
             // Start debounce timer - if no more keys within 100ms, execute the exact match
             const idx = exact_match_idx.?;
             std.debug.print("Exact match at index {} with {} total matches - starting debounce\n", .{ idx, matches });
-            startDebounceTimer(idx);
+            startDebounceTimer(idx, shift_held);
             return .consumed;
         }
 
@@ -456,9 +461,9 @@ pub fn handleKeyDown(keycode: u16, shift: bool, cmd: bool) InputResult {
         return processDelete();
     }
 
-    // Handle letter keys
+    // Handle letter keys (pass shift for right-click action)
     if (keycodeToChar(keycode)) |char| {
-        return processLetter(char);
+        return processLetter(char, shift);
     }
 
     return .consumed;
